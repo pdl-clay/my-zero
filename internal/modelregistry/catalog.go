@@ -197,19 +197,40 @@ func (registry Registry) SupportsCapability(pattern string, capability ModelCapa
 }
 
 func (registry Registry) ReasoningEfforts(pattern string) []ReasoningEffort {
+	return registry.ReasoningEffortsForProvider("", pattern)
+}
+
+// ReasoningEffortsForProvider resolves pattern's supported reasoning-effort
+// tiers the same way ReasoningEfforts does, but additionally consults the
+// embedded models.dev snapshot and the curated gateway-model table when
+// pattern isn't a catalog entry — both need to know which provider profile is
+// asking (providerSlug, e.g. a config.ProviderProfile.CatalogID/Provider
+// string, passed through verbatim; see reasoningEffortsFromEmbedded's doc for
+// why it is never mapped/guessed across providers). Prefer this over
+// ReasoningEfforts whenever the caller has a provider profile in scope.
+func (registry Registry) ReasoningEffortsForProvider(providerSlug, pattern string) []ReasoningEffort {
 	if model, ok := registry.Get(pattern); ok {
 		return append([]ReasoningEffort{}, effectiveReasoningEfforts(model)...)
 	}
 	// Unknown model not in the curated catalog — e.g. a GPT-5 / Codex / o-series
-	// variant served via the ChatGPT proxy or a custom OpenAI-compatible endpoint.
-	// Infer from the name so /effort still shows controls for it.
+	// variant served via the ChatGPT proxy, a direct provider using a real
+	// upstream api id the embedded snapshot covers, a gateway-renamed model the
+	// curated gateway table covers, or a custom OpenAI-compatible endpoint.
+	if efforts := reasoningEffortsFromEmbedded(providerSlug, pattern); len(efforts) > 0 {
+		return efforts
+	}
+	if efforts := gatewayReasoningEfforts(pattern); len(efforts) > 0 {
+		return efforts
+	}
 	return reasoningEffortsForModelName(pattern)
 }
 
-// reasoningEffortsForModelName infers reasoning-effort controls from a model name
-// for known reasoning families not present in the catalog. It returns nil for
-// non-reasoning models (e.g. GPT-4.1 / GPT-4o), so /effort stays empty there.
-func reasoningEffortsForModelName(name string) []ReasoningEffort {
+// bareModelID normalizes a model identifier for exact-match lookup: strips a
+// "provider:" qualifier and a "vendor/" gateway prefix (e.g. github's
+// "openai/o3-mini", together's "deepseek-ai/DeepSeek-R1"), lowercases, and
+// trims. Shared by reasoningEffortsForModelName and gatewayReasoningEfforts so
+// both see the same normalized key.
+func bareModelID(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	if i := strings.IndexByte(n, ':'); i >= 0 { // drop a "provider:" qualifier
 		n = n[i+1:]
@@ -219,6 +240,14 @@ func reasoningEffortsForModelName(name string) []ReasoningEffort {
 	if i := strings.LastIndexByte(n, '/'); i >= 0 {
 		n = n[i+1:]
 	}
+	return n
+}
+
+// reasoningEffortsForModelName infers reasoning-effort controls from a model name
+// for known reasoning families not present in the catalog. It returns nil for
+// non-reasoning models (e.g. GPT-4.1 / GPT-4o), so /effort stays empty there.
+func reasoningEffortsForModelName(name string) []ReasoningEffort {
+	n := bareModelID(name)
 	switch {
 	case strings.HasPrefix(n, "gpt-5") || strings.HasPrefix(n, "gpt5"):
 		// GPT-5 / Codex (gpt-5.x) add a "minimal" tier below low.

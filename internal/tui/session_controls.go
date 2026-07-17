@@ -139,7 +139,7 @@ func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
 	if err != nil {
 		return nil
 	}
-	return registry.ReasoningEfforts(m.modelName)
+	return registry.ReasoningEffortsForProvider(m.providerProfile.CatalogID, m.modelName)
 }
 
 func (m model) effortDisplay() string {

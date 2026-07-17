@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specmode"
@@ -75,6 +76,7 @@ type acpSession struct {
 	mu      sync.Mutex
 	mode    agent.PermissionMode
 	model   string // override; "" => config default
+	effort  string // reasoning-effort override; "" => auto/model default
 	cancel  context.CancelFunc
 	history []turnRecord
 
@@ -101,6 +103,7 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	conn.Handle(MethodSessionSetMode, a.handleSetMode)
 	conn.Handle(MethodSessionSetConfigOption, a.handleSetConfigOption)
 	conn.Handle(MethodZeroSetModel, a.handleZeroSetModel)
+	conn.Handle(MethodZeroSetEffort, a.handleZeroSetEffort)
 	conn.HandleNotify(MethodSessionCancel, a.handleCancel)
 	return a
 }
@@ -316,20 +319,27 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		specialists = tooling.Specialists()
 	}
 
+	modelRegistry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return "", RPCError(codeInternalError, "model registry: "+err.Error())
+	}
+	forwardEffort := modelregistry.ForwardedReasoningEffort(modelRegistry, resolved.Provider.CatalogID, resolved.Provider.Model, sess.currentEffort())
+
 	opts := agent.Options{
-		Cwd:            sess.cwd,
-		SessionID:      sess.id,
-		ProviderName:   resolved.Provider.Name,
-		Model:          resolved.Provider.Model,
-		Registry:       registry,
-		Sandbox:        sandboxEngine,
-		PermissionMode: mode,
-		MaxTurns:       resolved.MaxTurns,
-		Images:         images,
-		Specialists:    specialists,
-		OnText:         note.text,
-		OnReasoning:    note.thought,
-		OnToolCall:     note.toolCall,
+		Cwd:             sess.cwd,
+		SessionID:       sess.id,
+		ProviderName:    resolved.Provider.Name,
+		Model:           resolved.Provider.Model,
+		Registry:        registry,
+		Sandbox:         sandboxEngine,
+		PermissionMode:  mode,
+		MaxTurns:        resolved.MaxTurns,
+		Images:          images,
+		Specialists:     specialists,
+		ReasoningEffort: forwardEffort,
+		OnText:          note.text,
+		OnReasoning:     note.thought,
+		OnToolCall:      note.toolCall,
 		OnToolResult: func(result agent.ToolResult) {
 			note.toolResult(result)
 			if result.Name == "update_plan" {
@@ -477,6 +487,26 @@ func (a *Agent) handleZeroSetModel(_ context.Context, params json.RawMessage) (a
 	}
 	sess.setModel(p.Model)
 	return ZeroSetModelResult{Model: p.Model}, nil
+}
+
+func (a *Agent) handleZeroSetEffort(_ context.Context, params json.RawMessage) (any, error) {
+	var p ZeroSetEffortParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, RPCError(codeInvalidParams, "invalid _zero/set_effort params")
+	}
+	sess := a.session(p.SessionID)
+	if sess == nil {
+		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
+	}
+	effort := strings.ToLower(strings.TrimSpace(p.Effort))
+	if effort == "auto" {
+		effort = ""
+	}
+	if effort != "" && !modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(effort)) {
+		return nil, RPCError(codeInvalidParams, "unknown reasoning effort: "+p.Effort)
+	}
+	sess.setEffort(effort)
+	return ZeroSetEffortResult{Effort: effort}, nil
 }
 
 func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
@@ -686,6 +716,18 @@ func (s *acpSession) currentModel() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.model
+}
+
+func (s *acpSession) setEffort(effort string) {
+	s.mu.Lock()
+	s.effort = effort
+	s.mu.Unlock()
+}
+
+func (s *acpSession) currentEffort() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.effort
 }
 
 func (s *acpSession) appendHistory(rec turnRecord) {

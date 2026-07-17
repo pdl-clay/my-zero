@@ -23,7 +23,8 @@ const (
 
 	// Vendor-prefixed ZERO extensions (clients that don't support them ignore the
 	// method and degrade cleanly, per the spec's _-prefixed convention).
-	MethodZeroSetModel = "_zero/set_model"
+	MethodZeroSetModel  = "_zero/set_model"
+	MethodZeroSetEffort = "_zero/set_effort"
 )
 
 // SessionUpdate discriminator values (the "sessionUpdate" field).
@@ -389,6 +390,19 @@ type ZeroSetModelParams struct {
 
 type ZeroSetModelResult struct {
 	Model string `json:"model"`
+}
+
+// ---- vendor: _zero/set_effort ----
+
+type ZeroSetEffortParams struct {
+	SessionID string `json:"sessionId"`
+	// Effort is one of modelregistry's ReasoningEffort values, or ""/"auto" to
+	// clear back to the model/provider default.
+	Effort string `json:"effort"`
+}
+
+type ZeroSetEffortResult struct {
+	Effort string `json:"effort"`
 }
 
 // configIDModel is the SessionConfigOption id ZERO uses to expose model choice

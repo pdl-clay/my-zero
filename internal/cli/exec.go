@@ -370,7 +370,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// --model the override model is empty, so checking it here would silently
 	// skip the advisory even though the run uses a concrete effective model.
 	if runReasoningEffort != "" {
-		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.Model, runReasoningEffort); notice != "" {
+		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.CatalogID, resolved.Provider.Model, runReasoningEffort); notice != "" {
 			if _, err := fmt.Fprintln(stderr, notice); err != nil {
 				return exitCrash
 			}
@@ -378,7 +378,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	// Effort to forward on the provider request, gated to the resolved model's
 	// supported levels (empty for non-reasoning models).
-	forwardEffort := forwardedReasoningEffort(modelRegistry, resolved.Provider.Model, runReasoningEffort)
+	forwardEffort := forwardedReasoningEffort(modelRegistry, resolved.Provider.CatalogID, resolved.Provider.Model, runReasoningEffort)
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
@@ -1168,49 +1168,21 @@ func discoveredModelContextWindow(ctx context.Context, profile config.ProviderPr
 }
 
 // forwardedReasoningEffort returns the effort to send on the provider request.
-// It mirrors reasoningEffortNotice: a known model that does not support reasoning
-// yields "" (matching the "ignoring" advisory, so the request never carries an
-// unsupported parameter); a known reasoning model yields its effective level; an
-// unknown model (e.g. a custom OpenAI-compatible endpoint) forwards the requested
-// value as-is, since no support claim can be made for it.
-func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, requested string) string {
-	requested = strings.TrimSpace(requested)
-	if requested == "" {
-		return ""
-	}
-	entry, ok := registry.Get(strings.TrimSpace(modelID))
-	if !ok {
-		return requested
-	}
-	effective := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffort(strings.ToLower(requested)))
-	if effective == modelregistry.ReasoningEffortNone {
-		return ""
-	}
-	return string(effective)
+// Thin wrapper over modelregistry.ForwardedReasoningEffort — see its doc for
+// the full precedence/gating rules (curated catalog, embedded models.dev
+// snapshot, curated gateway table, then blind-forward for anything
+// unrecognized). providerSlug is the resolved provider profile's own
+// identifier (e.g. resolved.Provider.CatalogID), passed through verbatim.
+func forwardedReasoningEffort(registry modelregistry.Registry, providerSlug, modelID string, requested string) string {
+	return modelregistry.ForwardedReasoningEffort(registry, providerSlug, modelID, requested)
 }
 
 // reasoningEffortNotice resolves the requested --reasoning-effort against the
-// selected model's supported efforts via EffectiveReasoningEffort and returns a
-// short advisory when the requested value is unsupported (and was coerced to the
-// model default).
-func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
-	trimmed := strings.TrimSpace(modelID)
-	if trimmed == "" {
-		return ""
-	}
-	entry, ok := registry.Get(trimmed)
-	if !ok {
-		return ""
-	}
-	want := modelregistry.ReasoningEffort(strings.TrimSpace(strings.ToLower(requested)))
-	effective := modelregistry.EffectiveReasoningEffort(entry, want)
-	if effective == modelregistry.ReasoningEffortNone {
-		return fmt.Sprintf("%s does not support reasoning effort; ignoring --reasoning-effort %s", entry.ID, requested)
-	}
-	if want != "" && effective != want {
-		return fmt.Sprintf("reasoning effort %q is not supported by %s; using %s instead", requested, entry.ID, effective)
-	}
-	return ""
+// selected model's supported efforts and returns a short advisory when the
+// requested value is unsupported (and was coerced to the model default). Thin
+// wrapper over modelregistry.ReasoningEffortNotice — see forwardedReasoningEffort.
+func reasoningEffortNotice(registry modelregistry.Registry, providerSlug, modelID string, requested string) string {
+	return modelregistry.ReasoningEffortNotice(registry, providerSlug, modelID, requested)
 }
 
 func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, error) {

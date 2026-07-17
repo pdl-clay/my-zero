@@ -78,6 +78,79 @@ func TestRunProvidersModelsJSON(t *testing.T) {
 	}
 }
 
+func TestRunProvidersModelsJSONIncludesReasoningEfforts(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	// opencode-go: a gateway profile whose models aren't in modelregistry's
+	// curated catalog and aren't resolvable via the embedded models.dev
+	// snapshot (the profile's own CatalogID isn't a models.dev provider slug)
+	// - reasoning support here can only come from the curated gateway table.
+	deps.resolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "opencode-go",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			CatalogID:    "opencode-go",
+			BaseURL:      "https://api.example.com/zen/go/v1",
+			APIKey:       "sk-test",
+			Model:        "minimax-m3",
+		}
+		return config.ResolvedConfig{
+			ActiveProvider: "opencode-go",
+			Providers:      []config.ProviderProfile{profile},
+			Provider:       profile,
+		}, nil
+	}
+	deps.discoverProviderModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "minimax-m3", Description: "MiniMax M3"},
+			{ID: "some-unrecognized-model", Description: "Unrecognized"},
+		}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "models", "--json"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Models []struct {
+			ID               string   `json:"id"`
+			Reasoning        bool     `json:"reasoning"`
+			ReasoningEfforts []string `json:"reasoningEfforts"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Models) != 2 {
+		t.Fatalf("payload.Models = %#v", payload.Models)
+	}
+	minimax := payload.Models[0]
+	if minimax.ID != "minimax-m3" || !minimax.Reasoning {
+		t.Fatalf("minimax-m3 = %#v, want reasoning=true", minimax)
+	}
+	if want := []string{"low", "medium", "high"}; !slicesEqual(minimax.ReasoningEfforts, want) {
+		t.Fatalf("minimax-m3 reasoningEfforts = %v, want %v", minimax.ReasoningEfforts, want)
+	}
+	unrecognized := payload.Models[1]
+	if unrecognized.Reasoning || len(unrecognized.ReasoningEfforts) != 0 {
+		t.Fatalf("some-unrecognized-model = %#v, want no reasoning fields", unrecognized)
+	}
+}
+
+func slicesEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRunProvidersModelsSelectsNamedProvider(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

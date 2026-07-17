@@ -212,6 +212,90 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	}
 }
 
+func TestACPSetEffortUpdatesSession(t *testing.T) {
+	h := newHarness(t, testDeps(t))
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	var setRes ZeroSetEffortResult
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: newRes.SessionID, Effort: "high"}, &setRes); err != nil {
+		t.Fatalf("_zero/set_effort high: %v", err)
+	}
+	if setRes.Effort != "high" {
+		t.Fatalf("set_effort result = %q, want %q", setRes.Effort, "high")
+	}
+	// "auto" clears back to "" (model/provider default).
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: newRes.SessionID, Effort: "auto"}, &setRes); err != nil {
+		t.Fatalf("_zero/set_effort auto: %v", err)
+	}
+	if setRes.Effort != "" {
+		t.Fatalf("set_effort auto result = %q, want empty", setRes.Effort)
+	}
+	// An unknown effort value must be rejected.
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: newRes.SessionID, Effort: "bogus"}, &setRes); err == nil {
+		t.Fatal("expected error for unknown reasoning effort")
+	}
+	// An unknown session must be rejected.
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: "nope", Effort: "high"}, &setRes); err == nil {
+		t.Fatal("expected error for unknown session")
+	}
+}
+
+// TestACPRunTurnForwardsReasoningEffort proves _zero/set_effort actually
+// reaches agent.Options.ReasoningEffort on the next turn — not just the
+// session's in-memory field.
+func TestACPRunTurnForwardsReasoningEffort(t *testing.T) {
+	deps := testDeps(t)
+	var captured agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		captured = opts
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	// An unrecognized model (testDeps' "fake-model") makes no support claim,
+	// so a requested effort forwards as-is.
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: newRes.SessionID, Effort: "high"}, &ZeroSetEffortResult{}); err != nil {
+		t.Fatalf("_zero/set_effort: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: newRes.SessionID, Prompt: []ContentBlock{TextBlock("hi")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want %q (unrecognized model forwards as-is)", captured.ReasoningEffort, "high")
+	}
+
+	// Switching to a known reasoning model with an unsupported requested tier
+	// must coerce down to that model's effective default, proving the gating
+	// (not just a blind pass-through) reaches the provider request.
+	if err := h.client.Call(ctx, MethodZeroSetModel, ZeroSetModelParams{SessionID: newRes.SessionID, Model: "claude-sonnet-4.5"}, &ZeroSetModelResult{}); err != nil {
+		t.Fatalf("_zero/set_model: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodZeroSetEffort, ZeroSetEffortParams{SessionID: newRes.SessionID, Effort: "xhigh"}, &ZeroSetEffortResult{}); err != nil {
+		t.Fatalf("_zero/set_effort xhigh: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: newRes.SessionID, Prompt: []ContentBlock{TextBlock("hi again")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.ReasoningEffort != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want %q (claude-sonnet-4.5's default, xhigh unsupported)", captured.ReasoningEffort, "medium")
+	}
+}
+
 // TestACPRunTurnWiresSandboxAndScopedRegistry proves the sandbox engine and the
 // scoped registry from BuildWorkspace actually reach agent.Options — i.e. ACP
 // shell tools run confined, not unconfined on the host.

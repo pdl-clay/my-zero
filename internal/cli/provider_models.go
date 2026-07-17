@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
@@ -66,11 +67,23 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 
 	if options.json {
+		registry, err := modelregistry.DefaultRegistry()
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitProvider)
+		}
 		items := make([]map[string]any, 0, len(models))
 		for _, model := range models {
 			entry := map[string]any{"id": model.ID}
 			if description := strings.TrimSpace(model.Description); description != "" {
 				entry["description"] = description
+			}
+			if efforts := registry.ReasoningEffortsForProvider(profile.CatalogID, model.ID); len(efforts) > 0 {
+				entry["reasoning"] = true
+				values := make([]string, len(efforts))
+				for i, effort := range efforts {
+					values[i] = string(effort)
+				}
+				entry["reasoningEfforts"] = values
 			}
 			items = append(items, entry)
 		}

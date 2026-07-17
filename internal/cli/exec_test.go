@@ -878,15 +878,24 @@ func TestReasoningEffortNoticeCoercesUnsupportedEffort(t *testing.T) {
 	}
 	// claude-sonnet-4.5 supports low/medium/high with a medium default; xhigh is
 	// unsupported and should be coerced to the model default.
-	notice := reasoningEffortNotice(registry, "claude-sonnet-4.5", "xhigh")
+	notice := reasoningEffortNotice(registry, "", "claude-sonnet-4.5", "xhigh")
 	if !strings.Contains(notice, "not supported") || !strings.Contains(notice, "medium") {
 		t.Fatalf("expected coercion notice to default medium, got %q", notice)
 	}
-	if got := reasoningEffortNotice(registry, "claude-sonnet-4.5", "high"); got != "" {
+	if got := reasoningEffortNotice(registry, "", "claude-sonnet-4.5", "high"); got != "" {
 		t.Fatalf("expected no notice for a supported effort, got %q", got)
 	}
-	if got := reasoningEffortNotice(registry, "gpt-4.1", "high"); !strings.Contains(got, "does not support") {
+	if got := reasoningEffortNotice(registry, "", "gpt-4.1", "high"); !strings.Contains(got, "does not support") {
 		t.Fatalf("expected unsupported-model notice, got %q", got)
+	}
+	// opencode-go's minimax-m3 is a gateway-renamed model recognized only via
+	// the curated gateway table (modelregistry.gatewayModelEfforts), not the
+	// catalog - requesting an unsupported tier still yields a coercion notice.
+	if got := reasoningEffortNotice(registry, "opencode-go", "minimax-m3", "xhigh"); !strings.Contains(got, "not supported") {
+		t.Fatalf("expected coercion notice for gateway model, got %q", got)
+	}
+	if got := reasoningEffortNotice(registry, "opencode-go", "minimax-m3", "high"); got != "" {
+		t.Fatalf("expected no notice for a supported gateway-model effort, got %q", got)
 	}
 }
 
@@ -896,21 +905,24 @@ func TestForwardedReasoningEffortGating(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	cases := []struct {
-		name      string
-		model     string
-		requested string
-		want      string
+		name         string
+		providerSlug string
+		model        string
+		requested    string
+		want         string
 	}{
-		{"empty request", "claude-sonnet-4.5", "", ""},
-		{"supported reasoning model", "claude-sonnet-4.5", "high", "high"},
-		{"unsupported effort coerced to default", "claude-sonnet-4.5", "xhigh", "medium"},
-		{"known non-reasoning model suppressed", "gpt-4.1", "high", ""},
-		{"unknown model forwards as-is", "custom-endpoint-model", "high", "high"},
+		{"empty request", "", "claude-sonnet-4.5", "", ""},
+		{"supported reasoning model", "", "claude-sonnet-4.5", "high", "high"},
+		{"unsupported effort coerced to default", "", "claude-sonnet-4.5", "xhigh", "medium"},
+		{"known non-reasoning model suppressed", "", "gpt-4.1", "high", ""},
+		{"unknown model forwards as-is", "", "custom-endpoint-model", "high", "high"},
+		{"gateway model gated to supported tier", "opencode-go", "minimax-m3", "high", "high"},
+		{"gateway model unsupported effort coerced", "opencode-go", "minimax-m3", "xhigh", "low"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := forwardedReasoningEffort(registry, tc.model, tc.requested); got != tc.want {
-				t.Fatalf("forwardedReasoningEffort(%q, %q) = %q, want %q", tc.model, tc.requested, got, tc.want)
+			if got := forwardedReasoningEffort(registry, tc.providerSlug, tc.model, tc.requested); got != tc.want {
+				t.Fatalf("forwardedReasoningEffort(%q, %q, %q) = %q, want %q", tc.providerSlug, tc.model, tc.requested, got, tc.want)
 			}
 		})
 	}

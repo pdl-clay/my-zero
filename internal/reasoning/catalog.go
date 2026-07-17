@@ -19,6 +19,17 @@ import (
 // reasoning_options}` per api id, and bump `_fetched`. Runtime auto-refresh is a
 // separate change.
 //
+// Settled precedence in modelregistry (see effectiveReasoningEfforts and
+// Registry.ReasoningEffortsForProvider): (1) a curated ModelEntry's own
+// explicit ReasoningEfforts always wins when set; (2) this embedded snapshot,
+// keyed on the caller's own provider identifier passed through verbatim
+// (never mapped/guessed across providers — a gateway/proxy profile id simply
+// isn't a models.dev slug, so it naturally no-ops there); (3) a curated
+// gateway-model-id table (modelregistry.gatewayModelEfforts) for
+// gateway-renamed models this snapshot can't reach by exact id, or first-party
+// models this snapshot doesn't yet cover; (4) modelregistry's broad
+// name-pattern fallback (reasoningEffortsForModelName) as the last resort.
+//
 //go:embed modelsdev_snapshot.json
 var snapshotBytes []byte
 
