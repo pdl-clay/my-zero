@@ -14,6 +14,8 @@ func TestGatewayReasoningEfforts(t *testing.T) {
 		{"deepseek-v4-flash", []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortMax}},
 		{"deepseek-r1-distill-llama-70b", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
 		{"glm-z1-air", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
+		{"glm-5.2", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
+		{"z-ai/glm-5.2", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}}, // vendor/ prefix stripped
 		// together's raw id carries a vendor/ prefix; bareModelID strips it.
 		{"deepseek-ai/DeepSeek-R1", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
 		{"unknown-model-xyz", nil},

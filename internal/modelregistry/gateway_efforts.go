@@ -50,6 +50,12 @@ var gatewayModelEfforts = map[string][]ReasoningEffort{
 	// from "deepseek-r1-671b"/"deepseek-r1-distill-llama-70b" above — exact
 	// match only, no substring collision risk).
 	"deepseek-r1": {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
+
+	// gitlawb-opengateway curated list — the raw id is "z-ai/glm-5.2",
+	// described there as "GLM coding & reasoning model"; bareModelID strips
+	// the vendor/ prefix down to "glm-5.2", which is also the exact id
+	// opencode-go's live model discovery returns for the same model.
+	"glm-5.2": {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh},
 }
 
 // gatewayReasoningEfforts returns the curated reasoning-effort tiers for a
