@@ -859,6 +859,44 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 	}
 }
 
+// TestStreamCompletionSendsXHighAndMaxEffort covers the tiers outside the
+// original minimal/low/medium/high set - deepseek-v4-pro/flash's real
+// reasoning_options report ["high","max"] (see
+// internal/reasoning/modelsdev_snapshot.json), and callers already gate the
+// requested value against a model's own supported set before it reaches here,
+// so these must be forwarded as-is rather than silently dropped.
+func TestStreamCompletionSendsXHighAndMaxEffort(t *testing.T) {
+	for _, effort := range []string{"xhigh", "max"} {
+		var gotBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			writeSSE(w, `[DONE]`)
+		}))
+
+		provider, err := New(Options{BaseURL: server.URL + "/", Model: "deepseek-v4-pro"})
+		if err != nil {
+			server.Close()
+			t.Fatalf("New returned error: %v", err)
+		}
+		stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+			Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+			ReasoningEffort: effort,
+		})
+		if err != nil {
+			server.Close()
+			t.Fatalf("StreamCompletion returned error: %v", err)
+		}
+		drain(stream)
+		server.Close()
+
+		if got := gotBody["reasoning_effort"]; got != effort {
+			t.Fatalf("effort %q: reasoning_effort = %#v, want %q", effort, got, effort)
+		}
+	}
+}
+
 func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
 	for _, effort := range []string{"", "none", "bogus"} {
 		var gotBody map[string]any

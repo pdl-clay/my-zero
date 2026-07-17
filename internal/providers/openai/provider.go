@@ -501,11 +501,18 @@ func promptCacheKeyDisabled() bool {
 }
 
 // openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat
-// completions API accepts, or "" to omit the field. "none" (and anything else)
-// is dropped rather than risking a 400 on an unrecognized enum.
+// completions API (or an OpenAI-compatible endpoint) accepts, or "" to omit the
+// field. "none" (and anything else) is dropped rather than risking a 400 on an
+// unrecognized enum. xhigh/max are real tiers some OpenAI-compatible models
+// advertise (e.g. deepseek-v4-pro's reasoning_options report ["high","max"] -
+// see internal/reasoning/modelsdev_snapshot.json) - callers already gate the
+// requested value against the model's own supported set (modelregistry's
+// ForwardedReasoningEffort/EffectiveReasoningEffort), so any of these seven
+// reaching here is one the model claims to support and should be forwarded
+// as-is, not silently dropped.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
-	case "minimal", "low", "medium", "high":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return strings.ToLower(strings.TrimSpace(requested))
 	default:
 		return ""

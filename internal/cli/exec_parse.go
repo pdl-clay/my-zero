@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 )
@@ -505,10 +506,13 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 			return "", index, execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", next)}
 		}
 	case "--reasoning-effort", "--spec-reasoning-effort":
-		switch strings.ToLower(next) {
-		case "low", "medium", "high":
-		default:
-			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, or high.", flag, next)}
+		// Validate against the full ReasoningEffort enum, not just low/medium/
+		// high: models like GPT-5 (minimal) and deepseek-v4-pro (max) have
+		// tiers outside that set. Whether a given tier applies to the
+		// EFFECTIVE resolved model is gated later by reasoningEffortNotice/
+		// forwardedReasoningEffort - this only rejects outright-unknown values.
+		if !modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(strings.ToLower(next))) {
+			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected one of: minimal, low, medium, high, xhigh, max.", flag, next)}
 		}
 	case "--depth":
 		if _, err := strconv.Atoi(next); err != nil {
