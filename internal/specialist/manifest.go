@@ -252,11 +252,23 @@ func Validate(manifest *Manifest) error {
 		if err != nil {
 			return fmt.Errorf("load model registry: %w", err)
 		}
-		modelID, ok := registry.ResolveID(manifest.Metadata.Model)
-		if !ok {
-			return fmt.Errorf("specialist %q references unknown model %q", manifest.Metadata.Name, manifest.Metadata.Model)
+		// A hit normalizes to the catalog's canonical ID (e.g. resolves an
+		// alias/pattern). A miss is NOT an error: zero supports 25+
+		// providers and arbitrary OpenAI-/Anthropic-compatible endpoints
+		// (README), so a model pinned to a specialist is routinely one the
+		// curated catalog has never heard of - a custom gateway's model
+		// name, a self-hosted deployment, etc. Previously this hard-failed
+		// Validate(), which made loadDirectory (manifest.go) silently drop
+		// the ENTIRE specialist from Load()'s results over an unrelated
+		// field - Task then reported "specialist not found" for a
+		// specialist that plainly existed on disk, and any
+		// executor-generated recovery attempt lost the model pin entirely.
+		// Same fallback philosophy as ReasoningEfforts' "unknown model not
+		// in the curated catalog" case just below: keep the raw string
+		// as-is rather than reject it.
+		if modelID, ok := registry.ResolveID(manifest.Metadata.Model); ok {
+			manifest.Metadata.Model = modelID
 		}
-		manifest.Metadata.Model = modelID
 	}
 	if manifest.Metadata.ReasoningEffort != "" {
 		effort := strings.ToLower(manifest.Metadata.ReasoningEffort)

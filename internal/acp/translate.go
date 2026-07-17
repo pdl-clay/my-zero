@@ -213,3 +213,13 @@ func (n *notifier) plan(items []tools.PlanItem) {
 func (n *notifier) currentMode(modeID string) {
 	n.send(CurrentModeUpdate{SessionUpdate: UpdateCurrentMode, CurrentModeID: modeID})
 }
+
+func (n *notifier) specReviewRequired(meta map[string]string) {
+	n.send(SpecReviewRequiredUpdate{
+		SessionUpdate: UpdateSpecReviewRequired,
+		SpecID:        meta["specId"],
+		Title:         meta["specTitle"],
+		FilePath:      meta["specFilePath"],
+		RelativePath:  meta["relativePath"],
+	})
+}

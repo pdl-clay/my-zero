@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -63,11 +65,14 @@ func testDeps(t *testing.T) Deps {
 }
 
 // clientHarness wires a client Conn to an Agent over in-memory pipes and collects
-// session/update text chunks.
+// session/update text chunks (updates) plus every raw session/update payload
+// (rawUpdates), for tests that need to inspect update kinds other than
+// agent_message_chunk (e.g. the spec-draft review-required notification).
 type clientHarness struct {
-	client  *Conn
-	updates chan string
-	stop    func()
+	client     *Conn
+	updates    chan string
+	rawUpdates chan json.RawMessage
+	stop       func()
 }
 
 func newHarness(t *testing.T, deps Deps) *clientHarness {
@@ -78,7 +83,7 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 	client := NewConn(br, bw)
 	a := NewAgent(agentConn, deps)
 
-	h := &clientHarness{client: client, updates: make(chan string, 128)}
+	h := &clientHarness{client: client, updates: make(chan string, 128), rawUpdates: make(chan json.RawMessage, 128)}
 	client.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
 		var probe struct {
 			Update struct {
@@ -90,6 +95,10 @@ func newHarness(t *testing.T, deps Deps) *clientHarness {
 		}
 		if json.Unmarshal(params, &probe) != nil {
 			return
+		}
+		select {
+		case h.rawUpdates <- params:
+		default:
 		}
 		if probe.Update.SessionUpdate == UpdateAgentMessageChunk {
 			h.updates <- probe.Update.Content.Text
@@ -137,6 +146,15 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if newRes.Modes == nil || newRes.Modes.CurrentModeID != string(agent.PermissionModeAuto) {
 		t.Fatalf("expected auto mode, got %+v", newRes.Modes)
 	}
+	foundSpecDraft := false
+	for _, m := range newRes.Modes.AvailableModes {
+		if m.ID == string(agent.PermissionModeSpecDraft) {
+			foundSpecDraft = true
+		}
+	}
+	if !foundSpecDraft {
+		t.Fatalf("expected spec-draft to be an available mode, got %+v", newRes.Modes.AvailableModes)
+	}
 
 	// session/prompt
 	var promptRes PromptResult
@@ -177,9 +195,12 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
-	// auto/ask are accepted.
+	// auto/ask/spec-draft are accepted.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAsk)}, &SetSessionModeResult{}); err != nil {
 		t.Fatalf("set_mode ask: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeSpecDraft)}, &SetSessionModeResult{}); err != nil {
+		t.Fatalf("set_mode spec-draft: %v", err)
 	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
@@ -303,6 +324,289 @@ func TestACPLoadWarnsWhenHistoryReadFails(t *testing.T) {
 	})
 	if !strings.Contains(got, "Could not load session history") {
 		t.Fatalf("streamed text = %q, want load warning", got)
+	}
+}
+
+// submitSpecProvider always calls submit_spec on its first (only) turn,
+// mirroring internal/cli/exec_spec_test.go's submitSpecExecProvider, and
+// records the tool names offered in the request so a test can confirm
+// write/exec tools were NOT advertised in spec-draft mode.
+type submitSpecProvider struct {
+	requests []zeroruntime.CompletionRequest
+}
+
+func (p *submitSpecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.requests = append(p.requests, request)
+	arguments, _ := json.Marshal(map[string]string{
+		"title": "Add caching layer",
+		"plan":  "# Goal\n\nAdd a caching layer in front of the DB.",
+	})
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	select {
+	case <-ctx.Done():
+		close(ch)
+		return ch, ctx.Err()
+	case ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: specmode.SubmitToolName}:
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: string(arguments)}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func (p *submitSpecProvider) toolNames() []string {
+	if len(p.requests) == 0 {
+		return nil
+	}
+	var names []string
+	for _, tool := range p.requests[0].Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+// fakeWriteTool is a stand-in write-capable tool so the test can prove it is
+// filtered out of what the model sees in spec-draft mode (only read-only +
+// ask_user + submit_spec should be advertised - see
+// agent.toolAdvertisedInSpecDraft).
+type fakeWriteTool struct{}
+
+func (fakeWriteTool) Name() string             { return "write_file" }
+func (fakeWriteTool) Description() string      { return "writes a file" }
+func (fakeWriteTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
+func (fakeWriteTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt}
+}
+func (fakeWriteTool) Run(context.Context, map[string]any) tools.Result { return tools.Result{} }
+
+// TestACPSpecDraftModeRegistersSubmitSpecAndEmitsReviewUpdate proves the ACP
+// surface now matches `zero exec --use-spec`: switching a session to
+// spec-draft mode registers submit_spec, hides write-capable tools from what
+// the model is offered, and a submit_spec call emits the
+// "_zero/spec_review_required" session/update (not just a silent end_turn)
+// carrying the saved spec's identity.
+func TestACPSpecDraftModeRegistersSubmitSpecAndEmitsReviewUpdate(t *testing.T) {
+	deps := testDeps(t)
+	provider := &submitSpecProvider{}
+	deps.NewProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) { return provider, nil }
+	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		r := tools.NewRegistry()
+		r.Register(tools.NewUpdatePlanTool())
+		r.Register(fakeWriteTool{})
+		return r, nil, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeSpecDraft)}, &SetSessionModeResult{}); err != nil {
+		t.Fatalf("set_mode spec-draft: %v", err)
+	}
+
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt:    []ContentBlock{TextBlock("plan the caching layer")},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+
+	names := provider.toolNames()
+	hasSubmitSpec, hasWriteFile := false, false
+	for _, n := range names {
+		if n == specmode.SubmitToolName {
+			hasSubmitSpec = true
+		}
+		if n == "write_file" {
+			hasWriteFile = true
+		}
+	}
+	if !hasSubmitSpec {
+		t.Fatalf("expected submit_spec to be advertised in spec-draft mode, got tools %v", names)
+	}
+	if hasWriteFile {
+		t.Fatalf("expected write_file to be hidden in spec-draft mode, got tools %v", names)
+	}
+
+	update := findRawUpdate(t, h.rawUpdates, UpdateSpecReviewRequired)
+	var review SpecReviewRequiredUpdate
+	if err := json.Unmarshal(update, &review); err != nil {
+		t.Fatalf("unmarshal spec review update: %v", err)
+	}
+	if review.Title != "Add caching layer" {
+		t.Fatalf("review title = %q, want %q", review.Title, "Add caching layer")
+	}
+	if review.SpecID == "" || review.FilePath == "" || review.RelativePath == "" {
+		t.Fatalf("expected spec identity fields to be populated, got %+v", review)
+	}
+}
+
+// findRawUpdate drains rawUpdates for a session/update whose "update.sessionUpdate"
+// matches kind, returning its "update" field. Fails the test if none arrives.
+func findRawUpdate(t *testing.T, ch <-chan json.RawMessage, kind string) json.RawMessage {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case raw := <-ch:
+			var envelope struct {
+				Update json.RawMessage `json:"update"`
+			}
+			if json.Unmarshal(raw, &envelope) != nil {
+				continue
+			}
+			var probe struct {
+				SessionUpdate string `json:"sessionUpdate"`
+			}
+			if json.Unmarshal(envelope.Update, &probe) != nil {
+				continue
+			}
+			if probe.SessionUpdate == kind {
+				return envelope.Update
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for session/update kind %q", kind)
+			return nil
+		}
+	}
+}
+
+// fakeSpecialistTooling is a minimal SpecialistTooling used to prove
+// ensureSpecialists builds it ONCE per session, not once per turn (the
+// resource/goroutine leak Patch 2 fixes - see BuildWorkspace's per-turn doc
+// comment), and that Close() runs once when Agent.Serve returns.
+type fakeSpecialistTooling struct {
+	mu            sync.Mutex
+	registerCount int
+	closed        bool
+}
+
+func (f *fakeSpecialistTooling) RegisterInto(*tools.Registry) {
+	f.mu.Lock()
+	f.registerCount++
+	f.mu.Unlock()
+}
+
+func (f *fakeSpecialistTooling) Specialists() []agent.SpecialistInfo {
+	return []agent.SpecialistInfo{{Name: "reviewer", WhenToUse: "code review"}}
+}
+
+func (f *fakeSpecialistTooling) Close() error {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeSpecialistTooling) snapshot() (registerCount int, closed bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.registerCount, f.closed
+}
+
+// TestACPBuildsSpecialistToolingOnceReusesAcrossTurnsAndClosesOnShutdown is
+// the core regression test for Patch 2: BuildSpecialists must run at most
+// once per session (multiple turns must reuse the cached tooling via
+// RegisterInto, not rebuild the goroutine-bearing runtime each time), the
+// summary must reach agent.Options.Specialists so the system prompt's
+// delegation section appears, and Close() must run once Agent.Serve
+// returns - the only per-session teardown hook that exists.
+func TestACPBuildsSpecialistToolingOnceReusesAcrossTurnsAndClosesOnShutdown(t *testing.T) {
+	deps := testDeps(t)
+	tooling := &fakeSpecialistTooling{}
+	var buildMu sync.Mutex
+	buildCalls := 0
+	deps.BuildSpecialists = func(sessionID, workspaceRoot string, resolved config.ResolvedConfig) (SpecialistTooling, error) {
+		buildMu.Lock()
+		buildCalls++
+		buildMu.Unlock()
+		return tooling, nil
+	}
+	var lastOpts agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		lastOpts = opts
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+
+	h := newHarness(t, deps)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+			SessionID: newRes.SessionID,
+			Prompt:    []ContentBlock{TextBlock("hi")},
+		}, &PromptResult{}); err != nil {
+			t.Fatalf("session/prompt %d: %v", i, err)
+		}
+	}
+
+	buildMu.Lock()
+	gotBuildCalls := buildCalls
+	buildMu.Unlock()
+	if gotBuildCalls != 1 {
+		t.Fatalf("BuildSpecialists called %d times across 2 turns, want exactly 1 (rebuilding a goroutine-bearing runtime every turn is the leak this patch fixes)", gotBuildCalls)
+	}
+	if registerCount, _ := tooling.snapshot(); registerCount != 2 {
+		t.Fatalf("RegisterInto called %d times across 2 turns, want 2 (once per turn, reusing the cached runtime)", registerCount)
+	}
+	if len(lastOpts.Specialists) != 1 || lastOpts.Specialists[0].Name != "reviewer" {
+		t.Fatalf("agent.Options.Specialists = %+v, want the fake tooling's summary", lastOpts.Specialists)
+	}
+
+	// Triggers ctx cancel + pipe close -> conn.Serve returns -> Agent.Serve's
+	// deferred closeSessions runs.
+	h.stop()
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, closed := tooling.snapshot(); closed {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("specialist tooling was not closed after Agent.Serve returned")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestACPNoBuildSpecialistsMeansNoSpecialists confirms a nil
+// Deps.BuildSpecialists (the default before Patch 2, and still valid for a
+// deps literal that doesn't want Task-tool support) degrades cleanly: no
+// specialists are advertised, and no panic/error occurs.
+func TestACPNoBuildSpecialistsMeansNoSpecialists(t *testing.T) {
+	deps := testDeps(t) // testDeps leaves BuildSpecialists nil
+	var lastOpts agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		lastOpts = opts
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: newRes.SessionID, Prompt: []ContentBlock{TextBlock("hi")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if len(lastOpts.Specialists) != 0 {
+		t.Fatalf("expected no specialists with a nil BuildSpecialists, got %+v", lastOpts.Specialists)
 	}
 }
 

@@ -92,14 +92,22 @@ Review.`)
 		t.Fatalf("ReasoningEffort = %q, want high", manifest.Metadata.ReasoningEffort)
 	}
 
-	_, err = ParseMarkdown(`---
+	// A model outside the curated catalog is NOT an error - zero supports
+	// arbitrary OpenAI-/Anthropic-compatible endpoints (README), so a
+	// specialist pinned to a custom gateway's model name is routine, not
+	// invalid. It must load with the raw string kept as-is, not vanish
+	// from Load()'s results entirely (see Validate() in manifest.go).
+	manifest, err = ParseMarkdown(`---
 name: reviewer
 description: Reviews code
 model: fake-9000
 ---
 Review.`)
-	if err == nil || !strings.Contains(err.Error(), "unknown model") {
-		t.Fatalf("expected unknown model error, got %v", err)
+	if err != nil {
+		t.Fatalf("ParseMarkdown returned error for an uncataloged model: %v", err)
+	}
+	if manifest.Metadata.Model != "fake-9000" {
+		t.Fatalf("Model = %q, want the raw uncataloged string kept as-is", manifest.Metadata.Model)
 	}
 
 	_, err = ParseMarkdown(`---
@@ -374,6 +382,39 @@ Prompt.`)
 	warnings := strings.Join(result.Warnings, "\n")
 	if !strings.Contains(warnings, "skipped invalid specialist manifest") || !strings.Contains(warnings, "skipped symlink specialist manifest") {
 		t.Fatalf("expected invalid-file and symlink warnings, got %#v", result.Warnings)
+	}
+}
+
+// TestLoadKeepsSpecialistWithUncatalogedModel is the regression test for a
+// real bug: a specialist pinned to a model outside zero's curated catalog
+// (a custom OpenAI-compatible gateway's model name, in this case) used to
+// hard-fail Validate() and vanish entirely from Load()'s results -
+// task_tool's "specialist \"advisor\" not found. Available: ..." for a
+// specialist that plainly existed on disk, and any recovery via
+// GenerateSpecialist's overwrite lost the model pin for good. It must load
+// with the model kept exactly as configured.
+func TestLoadKeepsSpecialistWithUncatalogedModel(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	writeManifest(t, filepath.Join(projectDir, "advisor.md"), `---
+name: advisor
+description: Senior technical advisor
+model: deepseek-v4-pro
+tools:
+  - read-only
+---
+Advise.`)
+
+	result, err := Load(LoadOptions{Paths: Paths{ProjectDir: projectDir}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	manifest, ok := Find(result, "advisor")
+	if !ok {
+		t.Fatalf("advisor specialist with an uncataloged model should still load: %#v", result)
+	}
+	if manifest.Metadata.Model != "deepseek-v4-pro" {
+		t.Fatalf("Model = %q, want the configured model kept as-is", manifest.Metadata.Model)
 	}
 }
 

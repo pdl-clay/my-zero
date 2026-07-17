@@ -40,6 +40,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cursor
 
 /zero
+/.build/
 /zero.exe
 /zero-windows-command-runner.exe
 /zero-windows-sandbox-setup.exe

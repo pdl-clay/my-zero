@@ -36,6 +36,12 @@ const (
 	UpdatePlan              = "plan"
 	UpdateAvailableCommands = "available_commands_update"
 	UpdateCurrentMode       = "current_mode_update"
+	// UpdateSpecReviewRequired is a ZERO extension (not part of the ACP spec,
+	// hence the "_zero/" prefix - same convention as MethodZeroSetModel):
+	// emitted when the model calls submit_spec in spec-draft mode, so a
+	// client can show the drafted spec for approval instead of silently
+	// ending the turn.
+	UpdateSpecReviewRequired = "_zero/spec_review_required"
 )
 
 // ---- initialize ----
@@ -278,6 +284,18 @@ type AvailableCommandsUpdate struct {
 type CurrentModeUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	CurrentModeID string `json:"currentModeId"`
+}
+
+// SpecReviewRequiredUpdate carries the saved spec's identity so a client can
+// fetch/render it for approval. Fields mirror the Meta keys SubmitTool.Run
+// sets (internal/specmode/exit_tool.go): specId, specTitle, specFilePath,
+// relativePath.
+type SpecReviewRequiredUpdate struct {
+	SessionUpdate string `json:"sessionUpdate"`
+	SpecID        string `json:"specId"`
+	Title         string `json:"title"`
+	FilePath      string `json:"filePath"`
+	RelativePath  string `json:"relativePath"`
 }
 
 // ---- permissions ----

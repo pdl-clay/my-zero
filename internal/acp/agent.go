@@ -8,11 +8,13 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -30,6 +32,14 @@ type Deps struct {
 	// validated workspace root, so ACP shell tools (bash/exec_command) are confined
 	// exactly like the exec surface — never run unconfined on the host.
 	BuildWorkspace func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error)
+	// BuildSpecialists builds this session's specialist/Task/swarm tooling
+	// (see SpecialistTooling). Nil-safe: a nil func means ACP sessions get
+	// no Task tool, same as before this existed. sessionID lets the
+	// implementation namespace per-session state (e.g. the swarm mailbox
+	// dir) so concurrent sessions rooted at the same workspace don't
+	// collide - unlike BuildWorkspace, this is called at most ONCE per
+	// session (see acpSession.ensureSpecialists), not once per turn.
+	BuildSpecialists func(sessionID, workspaceRoot string, resolved config.ResolvedConfig) (SpecialistTooling, error)
 	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
 	// existing directory; never the bare root). It is the file-tool confinement root.
 	ResolveWorkspaceRoot func(cwd string) (string, error)
@@ -67,6 +77,18 @@ type acpSession struct {
 	model   string // override; "" => config default
 	cancel  context.CancelFunc
 	history []turnRecord
+
+	// specialistOnce/specialists cache this session's specialist/Task/swarm
+	// tooling (see ensureSpecialists) so it's built at most once per
+	// session, not once per turn - reused across turns via
+	// specialists.RegisterInto, and released once at process shutdown (see
+	// Agent.closeSessions). Reads/writes only happen while turnMu is held
+	// (ensureSpecialists is only called from runTurn, itself always called
+	// under turnMu - see handleSessionPrompt), which is also what
+	// closeSessions takes before reading this field, so no separate mutex
+	// guards it.
+	specialistOnce sync.Once
+	specialists    SpecialistTooling
 }
 
 // NewAgent builds the ACP server and registers its method handlers on conn.
@@ -83,8 +105,59 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	return a
 }
 
-// Serve runs the connection read loop until the stream closes or ctx is done.
-func (a *Agent) Serve(ctx context.Context) error { return a.conn.Serve(ctx) }
+// Serve runs the connection read loop until the stream closes or ctx is
+// done, then releases every session's cached specialist tooling (see
+// closeSessions) - there is no earlier per-session teardown hook anywhere
+// in this file (sessions are never evicted from a.sessions before the
+// process exits), so process shutdown is the only correct place to do this
+// without inventing a new session-eviction mechanism.
+func (a *Agent) Serve(ctx context.Context) error {
+	defer a.closeSessions()
+	return a.conn.Serve(ctx)
+}
+
+// closeSessions releases every session's cached specialist tooling. Takes
+// each session's turnMu before closing so an in-flight turn (still holding
+// turnMu, still possibly mid-delegation to a specialist) finishes first
+// rather than having its swarm/runtime yanked out from under it.
+func (a *Agent) closeSessions() {
+	a.mu.Lock()
+	sessions := make([]*acpSession, 0, len(a.sessions))
+	for _, s := range a.sessions {
+		sessions = append(sessions, s)
+	}
+	a.mu.Unlock()
+
+	for _, s := range sessions {
+		s.turnMu.Lock()
+		if s.specialists != nil {
+			if err := s.specialists.Close(); err != nil {
+				log.Printf("zero acp: failed to close specialist tooling for session %s: %v", s.id, err)
+			}
+		}
+		s.turnMu.Unlock()
+	}
+}
+
+// ensureSpecialists builds this session's specialist tooling on first use
+// and caches it for the life of the session. A build failure is logged and
+// degrades to no specialists rather than failing the turn - matches the
+// non-fatal philosophy of specialistSummaries in internal/cli/app.go (a run
+// without delegation is still a working run).
+func (a *Agent) ensureSpecialists(sess *acpSession, resolved config.ResolvedConfig) SpecialistTooling {
+	if a.deps.BuildSpecialists == nil {
+		return nil
+	}
+	sess.specialistOnce.Do(func() {
+		tooling, err := a.deps.BuildSpecialists(sess.id, sess.cwd, resolved)
+		if err != nil {
+			log.Printf("zero acp: failed to build specialist tooling for session %s: %v", sess.id, err)
+			return
+		}
+		sess.specialists = tooling
+	})
+	return sess.specialists
+}
 
 // ---- initialize ----
 
@@ -229,6 +302,20 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 
+	mode := sess.currentMode()
+
+	// Build (first turn) or reuse (later turns) this session's Task-tool/
+	// specialist support. Registering into `registry` here, rather than
+	// once inside BuildWorkspace, is what avoids rebuilding the
+	// goroutine-bearing runtime+swarm on every turn (BuildWorkspace runs
+	// per-turn; ensureSpecialists' sync.Once runs at most once per
+	// session).
+	var specialists []agent.SpecialistInfo
+	if tooling := a.ensureSpecialists(sess, resolved); tooling != nil {
+		tooling.RegisterInto(registry)
+		specialists = tooling.Specialists()
+	}
+
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -236,9 +323,10 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		Model:          resolved.Provider.Model,
 		Registry:       registry,
 		Sandbox:        sandboxEngine,
-		PermissionMode: sess.currentMode(),
+		PermissionMode: mode,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
+		Specialists:    specialists,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
 		OnToolCall:     note.toolCall,
@@ -247,10 +335,27 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 			if result.Name == "update_plan" {
 				a.emitPlan(registry, note)
 			}
+			// "control" mirrors the unexported toolResultMetaControl key in
+			// internal/agent/loop.go - the Meta key SubmitTool.Run sets
+			// alongside specmode.ControlSpecReviewRequired.
+			if result.Name == specmode.SubmitToolName && result.Meta["control"] == specmode.ControlSpecReviewRequired {
+				note.specReviewRequired(result.Meta)
+			}
 		},
 		OnPermissionRequest: func(ctx context.Context, req agent.PermissionRequest) (agent.PermissionDecision, error) {
 			return a.requestPermission(ctx, sess.id, req)
 		},
+	}
+
+	// In spec-draft mode, register submit_spec and swap in the draft-only
+	// system prompt - the model loop already gates which tools are
+	// *advertised* to the model by PermissionMode (see
+	// agent.toolAdvertisedInSpecDraft: read-only + ask_user + submit_spec
+	// only), so registering the tool here is the only piece this surface
+	// needs beyond what `zero exec --use-spec` already does identically.
+	if mode == agent.PermissionModeSpecDraft {
+		specmode.RegisterDraftTools(registry, sess.cwd, time.Now)
+		opts.SystemPrompt = specmode.DraftSystemPrompt
 	}
 
 	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
@@ -331,7 +436,7 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk:
+	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModeSpecDraft:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
@@ -387,13 +492,15 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
-	// Only auto/ask are offered over ACP; Unsafe is gated to the operator (see
-	// handleSetMode) so a client can't grant itself no-prompt host access.
+	// auto/ask/spec-draft are offered over ACP; Unsafe is gated to the
+	// operator (see handleSetMode) so a client can't grant itself no-prompt
+	// host access.
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
 			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
+			{ID: string(agent.PermissionModeSpecDraft), Name: "Plan", Description: "Draft a read-only implementation spec for review before any changes are made."},
 		},
 	}
 }

@@ -1018,7 +1018,13 @@ func localArtifactsDirFromConfig(workspaceRoot string, cfg config.LocalControlCo
 
 // agentToolRuntime bundles the specialist runtime with the swarm it backs so
 // their lifetimes (and shutdown) stay paired: registerSpecialistTools brings up
-// both, closeSpecialistRuntime tears down both.
+// both, closeSpecialistRuntime tears down both. It also implements
+// acp.SpecialistTooling (RegisterInto/Specialists/Close - see below) so the
+// ACP surface (internal/acp/agent.go) can build one of these ONCE per
+// session and reuse it across turns, instead of rebuilding the
+// goroutine-bearing runtime+swarm on every `session/prompt`. exec.go never
+// calls RegisterInto/Specialists/Close directly - it builds once and runs
+// once, same as before this existed.
 type agentToolRuntime struct {
 	specialist *specialist.Runtime
 	swarm      *swarm.Swarm
@@ -1026,6 +1032,15 @@ type agentToolRuntime struct {
 	// the orchestrator's system-prompt delegation section. Populated alongside the
 	// tools, so it is present exactly when the Task tool is.
 	specialists []agent.SpecialistInfo
+	// executor is the specialist.Executor used to build `specialist` above,
+	// with BackgroundRuntime explicitly bound to it (specialist.RegisterTools
+	// only builds a new Runtime when BackgroundRuntime is nil - see its doc
+	// comment in internal/specialist/registry.go). Kept so RegisterInto can
+	// bind the SAME already-built runtime's tool objects into a fresh
+	// registry cheaply. Deliberately NOT the executor passed to the swarm
+	// launcher below (swarm members keep their own independent background
+	// runtime, unchanged from upstream behavior).
+	executor specialist.Executor
 }
 
 // specialistInfos returns the runtime's specialist summaries, nil-safe so the
@@ -1037,7 +1052,54 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 	return r.specialists
 }
 
+// Specialists implements acp.SpecialistTooling.
+func (r *agentToolRuntime) Specialists() []agent.SpecialistInfo { return r.specialistInfos() }
+
+// RegisterInto implements acp.SpecialistTooling: re-registers this
+// already-built runtime's tool objects into a fresh registry. Cheap - it
+// does not construct a new background manager or swarm, since
+// r.executor.BackgroundRuntime and r.swarm are already bound from the first
+// build (see registerSpecialistToolsWithBaseDir).
+func (r *agentToolRuntime) RegisterInto(registry *tools.Registry) {
+	if r == nil {
+		return
+	}
+	_, _ = specialist.RegisterTools(registry, r.executor)
+	if r.swarm != nil {
+		swarm.RegisterTools(registry, r.swarm)
+	}
+}
+
+// Close implements acp.SpecialistTooling, releasing the swarm's
+// scheduler/mailbox goroutines and the specialist runtime's background
+// manager + tracked prompt temp files.
+func (r *agentToolRuntime) Close() error {
+	if r == nil {
+		return nil
+	}
+	var errs []error
+	if r.swarm != nil {
+		r.swarm.Close()
+	}
+	if r.specialist != nil {
+		if err := r.specialist.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
+	return registerSpecialistToolsWithBaseDir(registry, workspaceRoot, maxTeamSize, filepath.Join(workspaceRoot, ".zero", "swarm"))
+}
+
+// registerSpecialistToolsWithBaseDir is registerSpecialistTools with an
+// explicit swarm mailbox directory. The extra parameter exists for the ACP
+// surface (internal/acp/agent.go via buildACPSpecialistTooling below), which
+// needs one runtime *per session* rather than per process - each needs its
+// own mailbox dir so concurrent sessions rooted at the same workspace don't
+// collide.
+func registerSpecialistToolsWithBaseDir(registry *tools.Registry, workspaceRoot string, maxTeamSize int, baseDir string) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -1052,7 +1114,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 	// lives under the workspace so its files fall within the sandbox write rules.
 	// MaxTeamSize (0 => the swarm's default of 8) caps concurrent members per team.
 	sw, err := swarm.New(swarm.Options{
-		BaseDir:     filepath.Join(workspaceRoot, ".zero", "swarm"),
+		BaseDir:     baseDir,
 		Launcher:    swarm.NewSpecialistLauncher(executor),
 		MaxTeamSize: maxTeamSize,
 	})
@@ -1061,7 +1123,11 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
-	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
+
+	boundExecutor := executor
+	boundExecutor.BackgroundRuntime = runtime
+
+	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths), executor: boundExecutor}, nil
 }
 
 // specialistSummaries loads the available specialists (built-ins + user/project
@@ -1116,13 +1182,8 @@ func closeSpecialistRuntime(stderr io.Writer, runtime *agentToolRuntime) {
 	if runtime == nil {
 		return
 	}
-	if runtime.swarm != nil {
-		runtime.swarm.Close()
-	}
-	if runtime.specialist != nil {
-		if err := runtime.specialist.Close(); err != nil {
-			_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
-		}
+	if err := runtime.Close(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
 	}
 }
 

@@ -63,6 +63,11 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 			return registry, engine, nil
 		},
+		// Gives ACP sessions the same Task-tool/specialist delegation `zero
+		// exec` already has (registerSpecialistTools). Built once per
+		// session (internal/acp/agent.go's ensureSpecialists), not once per
+		// turn like BuildWorkspace above - see buildACPSpecialistTooling.
+		BuildSpecialists:     buildACPSpecialistTooling,
 		ResolveWorkspaceRoot: acpWorkspaceRootResolver(deps),
 		Store:                deps.newSessionStore(),
 		AgentInfo:            acp.Implementation{Name: "zero", Version: version},
@@ -74,6 +79,28 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)
 	}
 	return exitSuccess
+}
+
+// buildACPSpecialistTooling implements acp.Deps.BuildSpecialists: builds the
+// same specialist/Task/swarm runtime `zero exec` registers
+// (registerSpecialistTools), namespacing the swarm mailbox directory by
+// session id so concurrent ACP sessions rooted at the same workspace don't
+// share mailbox files - exec.go doesn't need this since it only ever builds
+// one runtime per process. The registry passed to
+// registerSpecialistToolsWithBaseDir here is a throwaway: the returned
+// *agentToolRuntime's RegisterInto is what actually populates each turn's
+// real registry (see internal/acp/agent.go's ensureSpecialists/runTurn) -
+// this call only needs *some* registry to satisfy
+// specialist.RegisterTools/swarm.RegisterTools' signatures while building
+// the runtime the first time.
+func buildACPSpecialistTooling(sessionID, workspaceRoot string, resolved config.ResolvedConfig) (acp.SpecialistTooling, error) {
+	registry := tools.NewRegistry()
+	baseDir := filepath.Join(workspaceRoot, ".zero", "swarm", sessionID)
+	runtime, err := registerSpecialistToolsWithBaseDir(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, baseDir)
+	if err != nil {
+		return nil, err
+	}
+	return runtime, nil
 }
 
 // acpWorkspaceRootResolver validates a client-supplied cwd into a confinement
