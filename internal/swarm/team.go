@@ -49,6 +49,15 @@ type Options struct {
 type Policy struct {
 	Model          string
 	PermissionMode string
+	// SessionID is the orchestrator's own zero session id. Threaded into each
+	// spawned member's MemberSpec.ParentSessionID so the member is created with
+	// --calling-session-id, which makes internal/sessions.PrepareExec tag it
+	// SessionKind=child with ParentSessionID/RootSessionID/AgentName set - the
+	// same linkage the Task tool's specialist children already get via
+	// specialist.TaskRunOptions.ParentSessionID. Empty is fine (e.g. tests that
+	// don't care about lineage); the member is then created as an untagged
+	// top-level session, same as before this field existed.
+	SessionID string
 }
 
 // Swarm is the façade the swarm tools call. It owns the agent roster, the task
@@ -361,15 +370,16 @@ func (s *Swarm) buildSpec(pol Policy, memberID, taskID, team string, def Definit
 		prompt = def.SystemPrompt(PromptContext{Team: team, Task: task})
 	}
 	return MemberSpec{
-		ID:             memberID,
-		TaskID:         taskID,
-		AgentType:      def.AgentType,
-		Team:           team,
-		Task:           task,
-		Cwd:            cwd,
-		Model:          resolveModel(pol, def),
-		PermissionMode: resolvePermissionMode(pol, def),
-		SystemPrompt:   prompt,
+		ID:              memberID,
+		TaskID:          taskID,
+		AgentType:       def.AgentType,
+		Team:            team,
+		Task:            task,
+		Cwd:             cwd,
+		Model:           resolveModel(pol, def),
+		PermissionMode:  resolvePermissionMode(pol, def),
+		SystemPrompt:    prompt,
+		ParentSessionID: pol.SessionID,
 	}
 }
 

@@ -54,6 +54,13 @@ func NewSpecialistLauncher(executor specialist.Executor) MemberLauncher {
 			// rather than the read-only "low" a plain specialist child would get.
 			// Still clamped to non-unsafe and sandbox-confined to the workspace.
 			MemberAutonomy: true,
+			// Links the member's zero session back to its orchestrator (see
+			// Policy.SessionID / MemberSpec.ParentSessionID) so it shows up in
+			// `zero sessions list` tagged SessionKind=child with
+			// ParentSessionID/RootSessionID/AgentName set, exactly like a
+			// Task-tool specialist child - instead of looking like an untagged
+			// top-level session.
+			ParentSessionID: spec.ParentSessionID,
 		})
 		if err != nil {
 			// Preserve the child session id on a post-start failure too (exec.go

@@ -115,7 +115,7 @@ func TestSpawnCompletes(t *testing.T) {
 func TestSpawnInheritsPolicy(t *testing.T) {
 	l := newLauncher(okFor)
 	sw := newSwarmFor(t, l)
-	_, err := sw.Spawn(Policy{Model: "orch-model", PermissionMode: permissionModeAuto}, "team", "teammate", "task", "/cwd")
+	_, err := sw.Spawn(Policy{Model: "orch-model", PermissionMode: permissionModeAuto, SessionID: "sess-orch"}, "team", "teammate", "task", "/cwd")
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -132,6 +132,9 @@ func TestSpawnInheritsPolicy(t *testing.T) {
 	}
 	if spec.SystemPrompt == "" {
 		t.Fatal("member should carry a resolved system prompt")
+	}
+	if spec.ParentSessionID != "sess-orch" {
+		t.Fatalf("member parent session id = %q, want sess-orch", spec.ParentSessionID)
 	}
 }
 

@@ -23,6 +23,13 @@ type MemberSpec struct {
 	Model          string // resolved (never the "inherit" sentinel)
 	PermissionMode string
 	SystemPrompt   string
+	// ParentSessionID is the orchestrator's zero session id (from
+	// Policy.SessionID), threaded to the launcher so the member's zero session
+	// is created with --calling-session-id, linking it back to its
+	// orchestrator in the session store exactly like a Task-tool specialist
+	// child. Empty means untagged top-level (e.g. a Policy without a
+	// SessionID).
+	ParentSessionID string
 }
 
 // MemberResult is what a finished member returns.

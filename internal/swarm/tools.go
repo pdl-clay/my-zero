@@ -80,7 +80,7 @@ func (s *Swarm) hasActiveSwarm() bool {
 // policyFrom derives the member-inheritance policy from the live tool options so
 // each spawned member runs on the orchestrator's current model + permission mode.
 func policyFrom(options tools.RunOptions) Policy {
-	return Policy{Model: options.Model, PermissionMode: options.PermissionMode}
+	return Policy{Model: options.Model, PermissionMode: options.PermissionMode, SessionID: options.SessionID}
 }
 
 func swarmStr(args map[string]any, key string) string {
