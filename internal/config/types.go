@@ -18,6 +18,7 @@ const (
 	ProviderKindAnthropicCompat  ProviderKind = "anthropic-compatible"
 	ProviderKindGoogle           ProviderKind = "google"
 	ProviderKindOpenAICompatible ProviderKind = "openai-compatible"
+	ProviderKindStepFun          ProviderKind = "stepfun"
 )
 
 type ProviderProfile struct {

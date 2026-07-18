@@ -14,6 +14,7 @@ const (
 	ProviderAnthropic        ProviderKind = "anthropic"
 	ProviderGoogle           ProviderKind = "google"
 	ProviderOpenAICompatible ProviderKind = "openai-compatible"
+	ProviderStepFun          ProviderKind = "stepfun"
 )
 
 type ReasoningEffort string
@@ -397,7 +398,7 @@ func normalizePattern(pattern string) string {
 
 func ValidPrimaryProviderKind(provider ProviderKind) bool {
 	switch provider {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGoogle:
+	case ProviderOpenAI, ProviderAnthropic, ProviderGoogle, ProviderStepFun:
 		return true
 	default:
 		return false

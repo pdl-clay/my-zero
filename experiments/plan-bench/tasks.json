@@ -1,0 +1,10 @@
+[
+  {
+    "id": "example-1",
+    "prompt": "REPLACE ME: describe a real, medium-complexity task from this repo, the kind you'd normally hand to plan mode. One or two sentences, same as what a user would type."
+  },
+  {
+    "id": "example-2",
+    "prompt": "REPLACE ME: a second real task. Aim for 10-15 tasks total covering a mix of difficulty (a couple of trivial ones, a couple that touch several files, one or two genuinely ambiguous ones) so the benchmark doesn't only measure the easy case."
+  }
+]

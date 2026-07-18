@@ -15,6 +15,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers/gemini"
 	"github.com/Gitlawb/zero/internal/providers/openai"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Gitlawb/zero/internal/providers/stepfun"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -51,6 +52,20 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	// using the openai.New path unchanged.
 	if isCodexCatalog(profile, resolved) {
 		return newCodexProvider(profile, resolved, options)
+	}
+
+	// The StepFun catalog shares the openai-compatible Transport (same
+	// /chat/completions request shape) but needs StepFun-specific request
+	// shaping (reasoning_effort mapping), so — like the ChatGPT (Codex) catalog
+	// above — we branch off the catalog id here rather than relying on
+	// resolved.providerKind. The "stepfun" descriptor is registered with
+	// openAICompat, so providerKindForDescriptor / providerWizardProviderKind /
+	// providerKindForCatalogTransport (which all map off Transport, not catalog
+	// id) persist ProviderKind == "openai-compatible" for every profile the
+	// wizard creates from it; resolved.providerKind would never become
+	// config.ProviderKindStepFun through the normal catalog flow without this.
+	if isStepFunCatalog(profile) {
+		return newStepFunProvider(profile, resolved, options)
 	}
 
 	switch resolved.providerKind {
@@ -103,6 +118,8 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,
 		})
+	case config.ProviderKindStepFun:
+		return newStepFunProvider(profile, resolved, options)
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", resolved.providerKind)
 	}
@@ -292,6 +309,35 @@ func defaultRegistry(registry *modelregistry.Registry) (modelregistry.Registry, 
 // provider's standard error path surfaces it.
 func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 	return providercatalog.NormalizeID(profile.CatalogID) == "chatgpt"
+}
+
+// isStepFunCatalog reports whether the profile targets the StepFun catalog
+// preset. Mirrors isCodexCatalog: the "stepfun" descriptor is registered with
+// the openai-compatible Transport (openAICompat helper), so it needs the same
+// catalog-id branch to reach its provider-specific request shaping.
+func isStepFunCatalog(profile config.ProviderProfile) bool {
+	return providercatalog.NormalizeID(profile.CatalogID) == "stepfun"
+}
+
+// newStepFunProvider builds the StepFun-flavored provider, applying its
+// reasoning_effort mapping on top of the shared openai-compatible request
+// shape. Used both for the catalog-id branch (real StepFun profiles, whose
+// ProviderKind is always "openai-compatible" per isStepFunCatalog's doc
+// comment) and for the config.ProviderKindStepFun switch case (a
+// hand-configured profile that pins providerKind: stepfun directly).
+func newStepFunProvider(profile config.ProviderProfile, resolved resolvedProfile, options Options) (zeroruntime.Provider, error) {
+	return stepfun.New(stepfun.Options{
+		APIKey:          profile.APIKey,
+		BaseURL:         resolved.baseURL,
+		Model:           resolved.apiModel,
+		AuthHeader:      profile.AuthHeader,
+		AuthScheme:      profile.AuthScheme,
+		AuthHeaderValue: profile.AuthHeaderValue,
+		CustomHeaders:   providerio.CopyHeaders(profile.CustomHeaders),
+		HTTPClient:      options.HTTPClient,
+		UserAgent:       options.UserAgent,
+		MaxTokens:       resolved.maxOutputTokens,
+	})
 }
 
 // newCodexProvider builds a Codex-flavored openai provider for the chatgpt

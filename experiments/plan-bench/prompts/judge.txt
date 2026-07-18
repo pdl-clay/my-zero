@@ -1,0 +1,33 @@
+You are grading an implementation plan produced by another AI. You did not
+write it and have no stake in it looking good - grade it exactly as you would
+want a plan graded before you personally had to implement it blind, with no
+chance to ask follow-up questions.
+
+Original task the plan was supposed to address:
+{{TASK}}
+
+Plan to grade:
+{{SPEC}}
+
+Use read_file/glob/grep on the actual workspace to verify claims where it
+matters (referenced files/functions exist, described patterns match reality).
+
+Score each criterion 0-10 (0 = absent/wrong, 10 = excellent), then give a
+one-line justification per score:
+- concreteness: does it commit to one approach with no unresolved "Option
+  A/B", and is every step specific enough to execute without guessing
+- feasibility: do the referenced files/functions/patterns actually exist as
+  described
+- coverage: are risks, edge cases, and tests addressed, not just the happy
+  path
+- correctness_external: are library/API/version claims accurate (not stale
+  or deprecated)
+- scope_discipline: does it do the task and not less/more than needed
+
+Respond with ONLY a single JSON object (no markdown fences, no prose outside
+it) with this exact shape:
+{"concreteness": <int>, "concreteness_note": "<text>", "feasibility": <int>,
+"feasibility_note": "<text>", "coverage": <int>, "coverage_note": "<text>",
+"correctness_external": <int>, "correctness_external_note": "<text>",
+"scope_discipline": <int>, "scope_discipline_note": "<text>", "overall_note":
+"<one sentence>"}

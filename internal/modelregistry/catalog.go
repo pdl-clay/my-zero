@@ -34,6 +34,7 @@ const (
 	openAIPricingSource    = "https://platform.openai.com/docs/pricing/"
 	anthropicPricingSource = "https://platform.claude.com/docs/en/about-claude/pricing"
 	googlePricingSource    = "https://ai.google.dev/gemini-api/docs/pricing"
+	stepfunPricingSource   = "https://platform.stepfun.com/docs/pricing"
 )
 
 type ListOptions struct {
@@ -61,6 +62,12 @@ func DefaultModelEntries() []ModelEntry {
 		googleModel("gemini-2.5-pro", "Gemini 2.5 Pro", "gemini-2.5-pro", ModelStatusActive, []string{"google:gemini-2.5-pro", "gemini-pro"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{Tiers: []ModelCostTier{{UpToInputTokens: 200_000, InputPerMillion: 1.25, CachedInputPerMillion: 0.125, OutputPerMillion: 10, Note: "Prompts up to 200k tokens."}, {InputPerMillion: 2.5, CachedInputPerMillion: 0.25, OutputPerMillion: 15, Note: "Prompts above 200k tokens."}}}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google general-purpose Pro model with tiered long-context pricing."),
 		googleModel("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini-2.5-flash", ModelStatusActive, []string{"google:gemini-2.5-flash", "gemini-flash"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.3, CachedInputPerMillion: 0.03, OutputPerMillion: 2.5}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google Flash model for low-latency coding interactions."),
 		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.1, CachedInputPerMillion: 0.01, OutputPerMillion: 0.4}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
+		stepfunModel("stepfun-step-2-16k", "StepFun Step 2 16K", "step-2-16k", ModelStatusActive, []string{"stepfun:stepfun-step-2-16k", "stepfun:step-2-16k"}, ContextLimits{ContextWindow: 16_384, MaxOutputTokens: 8_192}, ModelCost{InputPerMillion: 0.01, CachedInputPerMillion: 0, OutputPerMillion: 0.04}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun legacy small-context model for lightweight completions."),
+		stepfunModel("stepfun-step-2-flash", "StepFun Step 2 Flash", "step-2-flash", ModelStatusActive, []string{"stepfun:stepfun-step-2-flash", "stepfun:step-2-flash"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 8_192}, ModelCost{InputPerMillion: 0.005, CachedInputPerMillion: 0, OutputPerMillion: 0.02}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun low-cost Flash model for fast summaries and routing."),
+		stepfunModel("stepfun-step-3", "StepFun Step 3", "step-3", ModelStatusActive, []string{"stepfun:stepfun-step-3", "stepfun:step-3"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 0.5, CachedInputPerMillion: 0, OutputPerMillion: 1.5}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun general-purpose Step 3 model for daily agent work."),
+		stepfunModel("stepfun-step-3-flash", "StepFun Step 3 Flash", "step-3-flash", ModelStatusActive, []string{"stepfun:stepfun-step-3-flash", "stepfun:step-3-flash"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 0.15, CachedInputPerMillion: 0, OutputPerMillion: 0.6}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun mid-tier Flash model balancing cost and capability."),
+		stepfunModel("stepfun-step-3.5-flash", "StepFun Step 3.5 Flash", "step-3.5-flash", ModelStatusActive, []string{"stepfun:stepfun-step-3.5-flash", "stepfun:step-3.5-flash"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 0.2, CachedInputPerMillion: 0, OutputPerMillion: 0.8}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun newer Flash model with improved instruction following."),
+		stepfunModel("stepfun-step-3.7-flash", "StepFun Step 3.7 Flash", "step-3.7-flash", ModelStatusActive, []string{"stepfun:stepfun-step-3.7-flash", "stepfun:step-3.7-flash"}, ContextLimits{ContextWindow: 128_000, MaxOutputTokens: 16_384}, ModelCost{InputPerMillion: 0.25, CachedInputPerMillion: 0, OutputPerMillion: 1.0}, []ModelCapability{ModelCapabilityChat, ModelCapabilityStreaming, ModelCapabilityToolCalling, ModelCapabilitySystemPrompt}, standardReasoningEfforts(), "StepFun latest Flash model with broad tool-use coverage."),
 	}
 	decorateModelDepth(entries)
 	// Overlay volatile facts (context limits, base pricing) from a cached
@@ -345,6 +352,27 @@ func googleModel(id string, displayName string, apiModel string, status ModelSta
 		DisplayName:      displayName,
 		APIModel:         apiModel,
 		Provider:         ProviderGoogle,
+		ContextLimits:    limits,
+		ReasoningEfforts: efforts,
+		Capabilities:     withBaseCapabilities(extraCapabilities...),
+		Cost:             cost,
+		Status:           status,
+		Aliases:          aliases,
+		Description:      description,
+	}
+}
+
+func stepfunModel(id string, displayName string, apiModel string, status ModelStatus, aliases []string, limits ContextLimits, cost ModelCost, extraCapabilities []ModelCapability, efforts []ReasoningEffort, description string) ModelEntry {
+	cost.Currency = "USD"
+	cost.Unit = "per_1m_tokens"
+	cost.Source = stepfunPricingSource
+	cost.SourceLastVerified = sourceLastVerified
+	return ModelEntry{
+		ID:               id,
+		DisplayName:      displayName,
+		APIModel:         apiModel,
+		Provider:         ProviderStepFun,
+		APIProviders:     []ProviderKind{ProviderStepFun, ProviderOpenAICompatible},
 		ContextLimits:    limits,
 		ReasoningEfforts: efforts,
 		Capabilities:     withBaseCapabilities(extraCapabilities...),

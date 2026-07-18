@@ -1,0 +1,26 @@
+{
+  "_comment": "Fill in real model ids that your `zero` provider config accepts (same strings you'd pass to `zero exec -m <model>`). judge_model should be a stronger/more reliable model than the ones under test, kept fixed across the whole benchmark so scoring doesn't favor whichever cheap model happens to grade itself.",
+  "repo_path": ".",
+  "judge_model": "CHANGE_ME_strong_judge_model",
+  "models_under_test": [
+    "CHANGE_ME_small_model_a",
+    "CHANGE_ME_small_model_b"
+  ],
+  "variants": ["mono", "explore_critique", "full"],
+  "explorer_count": 2,
+  "explorer_focuses": [
+    "Existing patterns/conventions directly relevant to this task (similar features, naming, file layout).",
+    "Anything that could break or interact badly with this task (adjacent code, tests, config it might affect)."
+  ],
+  "critic_personas": ["critic_logic", "critic_security"],
+  "draft_reasoning_effort": "low",
+  "max_turns": {
+    "explorer": 10,
+    "critic": 8,
+    "checker": 10,
+    "draft": 25,
+    "judge": 10
+  },
+  "timeout_seconds": 600,
+  "parallel_workers": 4
+}

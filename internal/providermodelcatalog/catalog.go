@@ -122,6 +122,10 @@ var curatedModels = map[string][]Model{
 		{ID: "kimi-k2-turbo-preview", Description: "fast coding model"},
 		{ID: "moonshot-v1-128k", Description: "long-context model"},
 	},
+	"stepfun": {
+		{ID: "step-3.5-flash", Description: "catalog default", Reasoning: true, ToolCall: true},
+		{ID: "step-3.7-flash", Description: "multimodal reasoning model", Reasoning: true, ToolCall: true, InputModalities: []string{"text", "image", "video"}},
+	},
 	"nvidia-nim": {
 		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "catalog default"},
 		{ID: "meta/llama-3.1-70b-instruct", Description: "general model"},

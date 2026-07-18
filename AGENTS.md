@@ -1,9 +1,3 @@
----
-description: Project guidelines for the open-source CLI coding agent (zero) repository.
-globs: "*.go, *.js, *.md, *.json, *.toml, *.yaml, *.yml"
-alwaysApply: false
----
-
 # Repository Conventions for Zero
 
 This file outlines the project conventions and repository guidelines for coding agents when working on the `zero` repository. For the general guide on how to extend Zero (write specialist sub-agents, hooks, plugins, MCP, skills), see [docs/EXTENDING.md](docs/EXTENDING.md).
