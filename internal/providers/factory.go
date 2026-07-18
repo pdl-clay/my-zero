@@ -311,12 +311,19 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 	return providercatalog.NormalizeID(profile.CatalogID) == "chatgpt"
 }
 
-// isStepFunCatalog reports whether the profile targets the StepFun catalog
-// preset. Mirrors isCodexCatalog: the "stepfun" descriptor is registered with
-// the openai-compatible Transport (openAICompat helper), so it needs the same
-// catalog-id branch to reach its provider-specific request shaping.
+// isStepFunCatalog reports whether the profile targets a StepFun catalog
+// preset — the public API ("stepfun") or the StepPlan product line
+// ("stepfun-plan", a different base path under the same account). Mirrors
+// isCodexCatalog: both descriptors are registered with the openai-compatible
+// Transport (openAICompat helper), so they need the same catalog-id branch to
+// reach their provider-specific request shaping.
 func isStepFunCatalog(profile config.ProviderProfile) bool {
-	return providercatalog.NormalizeID(profile.CatalogID) == "stepfun"
+	switch providercatalog.NormalizeID(profile.CatalogID) {
+	case "stepfun", "stepfun-plan":
+		return true
+	default:
+		return false
+	}
 }
 
 // newStepFunProvider builds the StepFun-flavored provider, applying its

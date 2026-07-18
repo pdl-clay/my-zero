@@ -126,6 +126,10 @@ var curatedModels = map[string][]Model{
 		{ID: "step-3.5-flash", Description: "catalog default", Reasoning: true, ToolCall: true},
 		{ID: "step-3.7-flash", Description: "multimodal reasoning model", Reasoning: true, ToolCall: true, InputModalities: []string{"text", "image", "video"}},
 	},
+	"stepfun-plan": {
+		{ID: "step-3.5-flash", Description: "catalog default", Reasoning: true, ToolCall: true},
+		{ID: "step-3.7-flash", Description: "multimodal reasoning model", Reasoning: true, ToolCall: true, InputModalities: []string{"text", "image", "video"}},
+	},
 	"nvidia-nim": {
 		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "catalog default"},
 		{ID: "meta/llama-3.1-70b-instruct", Description: "general model"},

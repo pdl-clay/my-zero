@@ -33,8 +33,10 @@ type Provider struct {
 }
 
 // New creates a StepFun provider. When no BaseURL is supplied it defaults to
-// the public StepFun API; the StepPlan product uses a different base and can be
-// selected by setting BaseURL explicitly in the profile.
+// the public StepFun API; the StepPlan product uses a different base
+// (https://api.stepfun.ai/step_plan/v1) and is reached either via the
+// "stepfun-plan" catalog preset or by setting BaseURL explicitly in the
+// profile.
 func New(options Options) (*Provider, error) {
 	model := strings.TrimSpace(options.Model)
 	if model == "" {

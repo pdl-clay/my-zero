@@ -136,6 +136,12 @@ var descriptors = []Descriptor{
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
 	openAICompat("stepfun", "StepFun AI", "https://api.stepfun.ai/v1", "step-3.5-flash", []string{"STEPFUN_API_KEY"}, "step fun", "step-fun"),
+	// StepPlan is StepFun's separate product line: same account/API key, but a
+	// distinct base path (/step_plan/v1 instead of /v1) that only StepPlan
+	// subscriptions can reach. Kept as its own catalog entry (like
+	// minimax/minimaxi-cn) rather than an override so it shows up in setup/list
+	// without the user having to know the alternate path.
+	openAICompat("stepfun-plan", "StepFun StepPlan", "https://api.stepfun.ai/step_plan/v1", "step-3.5-flash", []string{"STEPFUN_API_KEY"}, "stepfun plan", "step plan", "stepplan", "step-plan"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
