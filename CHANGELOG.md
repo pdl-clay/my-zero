@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.5.0](https://github.com/pdl-clay/my-zero/compare/v0.4.0...v0.5.0) (2026-07-19)
+
+
+### Features
+
+* Add StepFun provider and catalog entries ([56b3355](https://github.com/pdl-clay/my-zero/commit/56b33559c808e24952c7251bdf02e44596da0115))
+* Enhance TUI options and spec mode for deep-plan functionality ([10d0c6d](https://github.com/pdl-clay/my-zero/commit/10d0c6dec291df0248e2b5c12ad8cab1a9b5690a))
+* introduce user prompt submit hook and enhance specialist lifecycle hooks ([cf3d6d6](https://github.com/pdl-clay/my-zero/commit/cf3d6d6f81c2ef34f52765ff0eba80be378a598d))
+* **stepfun:** add StepPlan catalog preset and route both to the StepFun provider ([11c521c](https://github.com/pdl-clay/my-zero/commit/11c521c052fde2d00983a1981adfc40937a85e22))
+
 ## [0.4.0](https://github.com/pdl-clay/my-zero/compare/v0.3.0...v0.4.0) (2026-07-17)
 
 
