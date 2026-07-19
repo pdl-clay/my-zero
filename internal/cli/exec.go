@@ -69,11 +69,15 @@ type execOptions struct {
 	// intentionally inert: nothing consumes it. Model selection is driven by
 	// --model / --mode instead. See writeExecHelp ("Accept legacy model profile
 	// selection") and TestRunExecAcceptsLegacyModelProfileFlags.
-	modelProfile          string
-	reasoningEffort       string
-	useSpec               bool
-	specModel             string
-	specReasoningEffort   string
+	modelProfile        string
+	reasoningEffort     string
+	useSpec             bool
+	specModel           string
+	specReasoningEffort string
+	// deepPlan opts a --use-spec run into the multi-agent explore/critique/
+	// consolidate pipeline (PermissionModeDeepPlan + specmode.DeepPlanSystemPrompt)
+	// instead of the single-shot spec-draft prompt. Requires useSpec.
+	deepPlan              bool
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat
@@ -221,6 +225,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if options.useSpec {
 		permissionMode = agent.PermissionModeSpecDraft
+		if options.deepPlan {
+			permissionMode = agent.PermissionModeDeepPlan
+		}
 	}
 	mcpRuntime, mcpSkip, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot)
 	if err != nil {
@@ -233,7 +240,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// are listable and filter-validatable; it fails OPEN (a bad plugin is skipped).
 	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot)
 	if options.useSpec {
-		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
+		if options.deepPlan {
+			specmode.RegisterDeepPlanTools(registry, workspaceRoot, deps.now, specialistRuntime.ReviewGate())
+		} else {
+			specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
+		}
 	}
 	// Build the model registry once and reuse it across every model-aware
 	// lookup in this exec run (model resolution, reasoning-effort advisory, and
@@ -571,6 +582,23 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// A resumed spec-implementation session (created by `zero spec approve`)
+	// gets the spec-compliance completion gate ONLY when the approved spec was
+	// drafted via --deep-plan: the mono draft is a single unreviewed pass with
+	// no adversarial critique to hold the implementation accountable to, and
+	// in practice the gate's extra iteration cost pushed a plain mono run past
+	// its turn budget for no compliance win worth that cost (confirmed by
+	// re-running the same benchmark task with the gate on for both - mono's
+	// score regressed while deep-plan's improved substantially). specialistRuntime
+	// may be nil (see shouldRegisterExecSpecialistTools) - the gate then stays
+	// nil too, same as any other run that never got swarm tooling.
+	var specComplianceGate agent.ComplianceGate
+	var specComplianceFilePath string
+	if preparedSession.Session.SessionKind == sessions.SessionKindSpecImpl &&
+		preparedSession.Session.SpecDraftPipeline == sessions.SpecDraftPipelineDeepPlan {
+		specComplianceFilePath = preparedSession.Session.SpecFilePath
+		specComplianceGate = specialistRuntime.ComplianceGate()
+	}
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
@@ -602,6 +630,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// --no-completion-gate lets conversational exec callers (a chat frontend
 		// with an operator present) opt out the same way.
 		RequireCompletionSignal: !options.noCompletionGate,
+		SpecComplianceGate:      specComplianceGate,
+		SpecFilePath:            specComplianceFilePath,
 		Sandbox:                 sandboxEngine,
 		FileTracker:             fileTracker,
 		Hooks:                   hookDispatcher,

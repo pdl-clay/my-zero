@@ -8,10 +8,12 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specmode"
+	udiff "github.com/aymanbagabas/go-udiff"
 )
 
 type specCommandOptions struct {
 	json            bool
+	diff            bool
 	comment         string
 	commentProvided bool
 	reason          string
@@ -26,6 +28,7 @@ type specCommandResult struct {
 	ImplementationSessionID string `json:"implementationSessionId,omitempty"`
 	Message                 string `json:"message,omitempty"`
 	Next                    string `json:"next,omitempty"`
+	UnifiedDiff             string `json:"unifiedDiff,omitempty"`
 }
 
 func runSpec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -71,6 +74,8 @@ func parseSpecArgs(args []string) (string, string, specCommandOptions, bool, err
 			return command, target, options, true, nil
 		case arg == "--json":
 			options.json = true
+		case arg == "--diff":
+			options.diff = true
 		case arg == "--comment":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -130,6 +135,9 @@ func parseSpecArgs(args []string) (string, string, specCommandOptions, bool, err
 	if options.reasonProvided && command != "reject" {
 		return command, target, options, false, execUsageError{"--reason is only valid for zero spec reject"}
 	}
+	if options.diff && command != "show" {
+		return command, target, options, false, execUsageError{"--diff is only valid for zero spec show"}
+	}
 	return command, strings.TrimSpace(target), options, false, nil
 }
 
@@ -180,6 +188,9 @@ func resolveSpecReviewTarget(store *sessions.Store, target string) (sessions.Met
 }
 
 func runSpecShow(store *sessions.Store, draft sessions.Metadata, options specCommandOptions, stdout io.Writer, stderr io.Writer) int {
+	if options.diff {
+		return runSpecShowDiff(store, draft, options, stdout, stderr)
+	}
 	body, path, err := specmode.LoadSpecFile(draft.Cwd, draft.SpecFilePath)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -198,6 +209,67 @@ func runSpecShow(store *sessions.Store, draft sessions.Metadata, options specCom
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintln(stdout, body); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runSpecShowDiff(store *sessions.Store, draft sessions.Metadata, options specCommandOptions, stdout io.Writer, stderr io.Writer) int {
+	if draft.SessionKind != sessions.SessionKindSpecDraft {
+		return writeExecUsageError(stderr, "--diff is only valid for a spec-draft session")
+	}
+	if draft.SpecSourceSessionID == "" {
+		return writeExecUsageError(stderr, "no previous rejected draft found for spec "+draft.SpecID)
+	}
+	prior, err := store.Get(draft.SpecSourceSessionID)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if prior == nil {
+		return writeExecUsageError(stderr, "no previous rejected draft found for spec "+draft.SpecID)
+	}
+	if prior.SpecStatus != sessions.SpecStatusRejected {
+		return writeExecUsageError(stderr, "no previous rejected draft found for spec "+draft.SpecID)
+	}
+	if prior.Cwd != draft.Cwd {
+		return writeExecUsageError(stderr, "previous rejected draft is in a different workspace")
+	}
+	// LoadSpecFile resolves+reads in one call, rejecting symlinks/non-regular
+	// files and empty specs - the same safety checks runSpecShow (above) relies
+	// on for the non-diff path, so the diff path gets them too instead of
+	// re-implementing a bare resolve+os.ReadFile without them.
+	previousBody, _, err := specmode.LoadSpecFile(prior.Cwd, prior.SpecFilePath)
+	if err != nil {
+		return writeAppError(stderr, fmt.Errorf("read previous spec file: %w", err).Error(), exitCrash)
+	}
+	currentBody, currentPath, err := specmode.LoadSpecFile(draft.Cwd, draft.SpecFilePath)
+	if err != nil {
+		return writeAppError(stderr, fmt.Errorf("read current spec file: %w", err).Error(), exitCrash)
+	}
+	// RedactValue takes/returns `any` (it also handles structs/maps for the JSON
+	// payload below); a string in always yields a string out, so the assertion
+	// is safe. The comma-ok form falls back to "" instead of panicking on the
+	// off chance that ever stops holding.
+	redactedPrevious, _ := redaction.RedactValue(previousBody, redaction.Options{}).(string)
+	redactedCurrent, _ := redaction.RedactValue(currentBody, redaction.Options{}).(string)
+	diff := udiff.Unified("previous", "current", redactedPrevious, redactedCurrent)
+	if options.json {
+		payload := map[string]any{
+			"specId":         draft.SpecID,
+			"specFilePath":   currentPath,
+			"draftSessionId": draft.SessionID,
+			"specStatus":     draft.SpecStatus,
+			"unifiedDiff":    diff,
+		}
+		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if diff == "" {
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, diff); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -239,6 +311,7 @@ func runSpecApprove(store *sessions.Store, draft sessions.Metadata, options spec
 		SpecUserComment:     options.comment,
 		SpecSourceSessionID: draft.SessionID,
 		Prompt:              prompt,
+		SpecDraftPipeline:   draft.SpecDraftPipeline,
 	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -347,7 +420,7 @@ func firstNonEmptyString(values ...string) string {
 
 func writeSpecHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
-  zero spec show <spec-id|draft-session-id> [--json]
+  zero spec show <spec-id|draft-session-id> [--diff] [--json]
   zero spec approve <spec-id|draft-session-id> [--comment <text>] [--json]
   zero spec reject <spec-id|draft-session-id> [--reason <text>] [--json]
 
@@ -357,6 +430,7 @@ Commands:
   reject    Mark a draft rejected
 
 Flags:
+      --diff             Show unified diff against the previous rejected draft
       --json            Print JSON output
       --comment <text>  Approval note to include in the implementation prompt
       --reason <text>   Rejection reason

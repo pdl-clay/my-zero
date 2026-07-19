@@ -176,6 +176,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// acceptanceRequested records that the one-time task-grounded acceptance check
 	// has already been demanded this run, so it fires at most once.
 	acceptanceRequested := false
+	// specComplianceRounds counts spec-compliance nudge rounds issued this run
+	// (an initial spawn-and-check round, plus fix-and-recheck rounds), bounded by
+	// maxSpecComplianceRounds. specComplianceTeam is the swarm team name the
+	// model was last told to use; it changes each round so a recheck's results
+	// never mix with a stale prior round's (team names are not scoped per round).
+	specComplianceRounds := 0
+	specComplianceTeam := "compliance"
+	specComplianceOK := false
 
 	// toolDefCache memoizes each tool's rendered JSON-schema definition across
 	// turns (a tool's advertised schema is stable for the run), so partitionTools
@@ -558,6 +566,59 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 						Content: acceptanceVerificationNudge(),
 					})
 					continue
+				}
+
+				// (4) Spec compliance: for a spec-implementation session, before
+				// accepting a "done" turn, require an INDEPENDENT compliance-checker
+				// specialist to have verified the workspace against the approved
+				// spec's concrete decisions (Options.SpecComplianceGate). Unlike (3)
+				// above, this cannot be satisfied by the model's own say-so - it
+				// requires evidence that swarm_collect actually ran for a compliance
+				// team, and that team's report ends in COMPLIANCE: PASS with no
+				// COMPLIANCE: FAIL also present. Bounded by maxSpecComplianceRounds
+				// (an initial spawn-and-check round, plus one fix-and-recheck round);
+				// if spent without a pass, the run finalizes as INCOMPLETE rather
+				// than accepting a run that may have silently deviated from the spec.
+				if options.SpecComplianceGate != nil && !specComplianceOK {
+					verdict, teamCollected := options.SpecComplianceGate.TeamVerdict(specComplianceTeam)
+					if !teamCollected {
+						// Fall back to scanning the conversation directly: the
+						// built-in spec-compliance-checker specialist is loaded
+						// generically (internal/specialist/builtin.go), so the
+						// model may reach it through the Task/TaskOutput tools
+						// instead of swarm_spawn/swarm_collect - equally
+						// trustworthy, since both surface real tool-execution
+						// output (never model-authored text) into messages.
+						if text, ok := latestComplianceVerdict(messages); ok {
+							verdict, teamCollected = text, true
+						}
+					}
+					switch {
+					case teamCollected && specCompliancePassed(verdict):
+						specComplianceOK = true
+					case specComplianceRounds < maxSpecComplianceRounds:
+						specComplianceRounds++
+						var nudge string
+						if !teamCollected {
+							nudge = specComplianceNudge(options.SpecFilePath, specComplianceTeam)
+						} else {
+							nextTeam := fmt.Sprintf("compliance-%d", specComplianceRounds)
+							nudge = specComplianceFixNudge(verdict, nextTeam)
+							specComplianceTeam = nextTeam
+						}
+						options.Trace.Counter(trace.CounterSpecComplianceNudges, 1)
+						messages = append(messages, zeroruntime.Message{
+							Role:    zeroruntime.MessageRoleUser,
+							Content: nudge,
+						})
+						continue
+					default:
+						result.Incomplete = true
+						result.IncompleteReason = "spec compliance check never passed"
+						result.FinalAnswer = collected.Text
+						result.Messages = copyMessages(messages)
+						return result, nil
+					}
 				}
 			}
 			// Finalization diagnostics gate: edits from this run may still have
@@ -972,12 +1033,12 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}, nil
 	}
 	tool, toolFound := registry.Get(call.Name)
-	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+	if (permissionMode == PermissionModeSpecDraft || permissionMode == PermissionModeDeepPlan) && toolFound && !ToolAdvertised(tool, permissionMode) {
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
 			Status:       tools.StatusError,
-			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			Output:       `Error: Tool "` + call.Name + `" is not available in ` + string(permissionMode) + ` mode.`,
 			DenialReason: DenialFiltered,
 		}, nil
 	}
@@ -2934,6 +2995,9 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if permissionMode == PermissionModeSpecDraft {
 		return toolAdvertisedInSpecDraft(tool)
 	}
+	if permissionMode == PermissionModeDeepPlan {
+		return toolAdvertisedInDeepPlan(tool)
+	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
@@ -2964,6 +3028,33 @@ func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
 	}
 	safety := tool.Safety()
 	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+}
+
+// toolAdvertisedInDeepPlan deliberately advertises ONLY these four tools —
+// unlike toolAdvertisedInSpecDraft, it does NOT fall through to every
+// read-only+auto-allowed tool. The orchestrator has no read_file/glob/grep/
+// list_directory of its own: every workspace fact must come from a spawned
+// deep-plan-explorer (team "explore"), never from the orchestrator's own
+// investigation. This was found necessary in practice, not just as a prompt
+// preference — an orchestrator with direct read access would sometimes do
+// its own extensive re-verification (confusing itself with noise, or simply
+// burning turns duplicating what the explorers already reported) instead of
+// trusting/reusing what the explorers already found, occasionally burning
+// its whole turn budget before ever reaching the review round or
+// submit_spec. Removing the capability at the tool-advertisement layer (and
+// the dispatch-time hard-deny below) makes that failure mode structurally
+// impossible rather than merely discouraged. Task and the other swarm_*
+// tools are hidden for the same reason as before: spawn+collect fully cover
+// the fan-out/fan-in need. The orchestrator never gets web_fetch/web_search
+// either — only a spawned checker specialist gets those, via its own tool
+// grant, independent of what the orchestrator can see.
+func toolAdvertisedInDeepPlan(tool tools.Tool) bool {
+	switch tool.Name() {
+	case "ask_user", "submit_spec", "swarm_spawn", "swarm_collect":
+		return true
+	default:
+		return false
+	}
 }
 
 func stopReasonFromToolResult(result ToolResult) StopReason {

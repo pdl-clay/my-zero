@@ -89,13 +89,37 @@ var swarmMemberToolGroups = []string{"read-only", "edit", "execute", "plan"}
 
 // specialistManifestForMember builds an inline specialist manifest from a swarm
 // member spec so the executor runs the member with the swarm definition's system
-// prompt and a general toolset, without requiring a registered specialist.
+// prompt and its tool grant, without requiring a registered specialist.
+//
+// spec.Tools (copied from the originating Definition.Tools by buildSpec) wins
+// when the definition declared one - this is how a restricted agent type (e.g.
+// the deep-plan-* specialists, read-only or read-only+web_fetch) actually gets
+// its narrower grant instead of the generic teammate/subagent toolset. An empty
+// spec.Tools (a Definition that never set it, e.g. plain "teammate"/"subagent")
+// falls back to swarmMemberToolGroups unchanged. Without this fallthrough check
+// every swarm member - regardless of declared Tools - would silently get the
+// same read/write/execute/plan grant, defeating any narrower Definition.Tools
+// (confirmed in practice: a deep-plan-checker spawned this way could never
+// reach web_fetch, since swarmMemberToolGroups does not include it, even though
+// its Definition explicitly grants it).
+//
+// spec.NetworkUnsafe likewise must reach Metadata.NetworkUnsafe: that field is
+// what BuildArgs/BuildResumeArgs check to escalate this one child's --auto to
+// "high" (see IsNetworkSafeTools). Leaving it unset (as this did before) means
+// the child keeps the orchestrator's ordinary autonomy, so even a correctly
+// tool-granted web_fetch call still hits a sandbox network-approval prompt that
+// gets headlessly denied - the exact failure this was meant to prevent.
 func specialistManifestForMember(spec MemberSpec) specialist.Manifest {
+	toolSelection := swarmMemberToolGroups
+	if len(spec.Tools) > 0 {
+		toolSelection = spec.Tools
+	}
 	return specialist.Manifest{
 		Metadata: specialist.Metadata{
-			Name:        spec.AgentType,
-			Description: "Swarm " + spec.AgentType + " member.",
-			Tools:       swarmMemberToolGroups,
+			Name:          spec.AgentType,
+			Description:   "Swarm " + spec.AgentType + " member.",
+			Tools:         toolSelection,
+			NetworkUnsafe: spec.NetworkUnsafe,
 		},
 		SystemPrompt: spec.SystemPrompt,
 		Location:     specialist.LocationBuiltin,

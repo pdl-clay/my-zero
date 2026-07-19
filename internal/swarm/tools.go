@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -153,6 +154,31 @@ func (t *spawnTool) Safety() tools.Safety {
 		AdvertiseInAuto: true,
 	}
 }
+
+// PermissionForArgs auto-approves spawning a member whose roster definition
+// resolves to a read-only (or read-only-plus-network) tool set — it can only
+// read the workspace (and, for a network-safe definition, fetch/search the
+// web), so spawning it is harmless — while keeping the static prompt for
+// every other agent type (e.g. teammate/subagent, which can write/execute).
+// Mirrors specialist.TaskTool.PermissionForArgs; unlike that one, an unknown
+// agent_type here just falls through to the prompt rather than being resolved
+// at approval time, since the same unknown-type error surfaces from
+// RunWithOptions either way. Implements tools.ArgsPermissioner.
+func (t *spawnTool) PermissionForArgs(args map[string]any) tools.Permission {
+	if t.sw == nil || t.sw.Registry() == nil {
+		return tools.PermissionPrompt
+	}
+	agentType := swarmStr(args, "agent_type")
+	def, err := t.sw.Registry().Lookup(agentType)
+	if err != nil {
+		return tools.PermissionPrompt
+	}
+	if specialist.IsNetworkSafeTools(def.Tools) {
+		return tools.PermissionAllow
+	}
+	return tools.PermissionPrompt
+}
+
 func (t *spawnTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	return t.RunWithOptions(ctx, args, tools.RunOptions{})
 }
@@ -490,10 +516,10 @@ func (t *collectTool) RunWithOptions(ctx context.Context, args map[string]any, _
 	for _, task := range tasks {
 		line := fmt.Sprintf("  - %s [%s] %s", task.ID, task.Status, task.Description)
 		if task.Result != "" {
-			line += "\n      result: " + collapse(task.Result)
+			line += "\n      result: " + boundedResult(task.Result)
 		}
 		if task.Err != "" {
-			line += "\n      error: " + collapse(task.Err)
+			line += "\n      error: " + boundedResult(task.Err)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -533,7 +559,9 @@ func renderTasks(coord *Coordinator, tasks []Task, team string) string {
 }
 
 // collapse trims a possibly-multiline string to a single compact line for
-// status/collect output.
+// swarm_status's scannable one-line-per-task overview (task.Description across
+// potentially many tasks at once) - not for swarm_collect's full result, see
+// boundedResult below.
 func collapse(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.Join(strings.Fields(s), " ")
@@ -543,4 +571,27 @@ func collapse(s string) string {
 		return string(runes[:max]) + "…"
 	}
 	return s
+}
+
+// resultOutputBudgetRunes bounds a single task's result/error text in
+// swarm_collect's output.
+const resultOutputBudgetRunes = 8000
+
+// boundedResult is collapse's counterpart for swarm_collect: it preserves the
+// original newlines/structure instead of flattening to one line, because a
+// critic or checker's report is markdown-formatted (headers, a claim-by-claim
+// table, a findings section) and collapsing it would make a substantive
+// multi-paragraph analysis unreadable. It only bounds worst-case size, with an
+// explicit truncation marker so the orchestrator knows when it is not seeing
+// the full report rather than silently losing the back half - found in
+// practice: collapse's 200-rune cap (meant for swarm_status's compact
+// overview) was reused here too, so a checker's real "current version is
+// actually vX.Y.Z" correction routinely never reached the orchestrator at all,
+// cut off mid-sentence before the findings section.
+func boundedResult(s string) string {
+	runes := []rune(s)
+	if len(runes) <= resultOutputBudgetRunes {
+		return s
+	}
+	return string(runes[:resultOutputBudgetRunes]) + fmt.Sprintf("\n…[truncated: %d of %d characters shown]", resultOutputBudgetRunes, len(runes))
 }

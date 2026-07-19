@@ -159,6 +159,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.reasoningEffort = strings.TrimSpace(strings.TrimPrefix(arg, "--reasoning-effort="))
 		case arg == "--use-spec":
 			options.useSpec = true
+		case arg == "--deep-plan":
+			options.deepPlan = true
 		case arg == "--spec-model":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -424,6 +426,9 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	}
 	if !options.useSpec && options.specReasoningEffort != "" {
 		return options, false, execUsageError{"--spec-reasoning-effort requires --use-spec."}
+	}
+	if options.deepPlan && !options.useSpec {
+		return options, false, execUsageError{"--deep-plan requires --use-spec."}
 	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}

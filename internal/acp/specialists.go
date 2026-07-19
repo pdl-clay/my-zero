@@ -2,6 +2,7 @@ package acp
 
 import (
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -30,6 +31,14 @@ type SpecialistTooling interface {
 	// agent.Options.Specialists / specialistDelegationContext in
 	// internal/agent/system_prompt.go).
 	Specialists() []agent.SpecialistInfo
+	// ReviewGate exposes this session's swarm as a specmode.ReviewGate, so
+	// deep-plan mode can gate submit_spec on the review team having actually
+	// been collected (see specmode.NewDeepPlanSubmitTool). May be nil.
+	ReviewGate() specmode.ReviewGate
+	// ComplianceGate exposes this session's swarm as an agent.ComplianceGate,
+	// for the spec-implementation completion gate (see
+	// agent.Options.SpecComplianceGate, internal/agent/loop.go). May be nil.
+	ComplianceGate() agent.ComplianceGate
 	// Close releases the runtime's background manager/swarm goroutines and
 	// any tracked temp files. Called once per session, at process shutdown
 	// (see Agent.closeSessions) - correct specifically because

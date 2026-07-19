@@ -115,6 +115,151 @@ func TestRunSpecRejectMarksDraftRejected(t *testing.T) {
 	}
 }
 
+func TestRunSpecShowDiffPrintsUnifiedDiff(t *testing.T) {
+	store, _, draft := seedSpecDraft(t)
+	rejectDraft(t, store, draft)
+
+	rejected, err := store.Get(draft.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redraft, err := store.Create(sessions.CreateInput{
+		SessionKind:         sessions.SessionKindSpecDraft,
+		Title:               "Review flow",
+		Cwd:                 draft.Cwd,
+		ModelID:             "test-model",
+		Provider:            "test",
+		SpecID:              rejected.SpecID + "-v2",
+		SpecFilePath:        rejected.SpecFilePath + ".v2",
+		SpecStatus:          sessions.SpecStatusDraft,
+		SpecDraftModelID:    "test-model",
+		SpecDraftReasoning:  "high",
+		SpecSourceSessionID: rejected.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redraftPath, err := specmode.ResolveSpecFilePath(redraft.Cwd, redraft.SpecFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(redraftPath, []byte("# Goal\n\nAdd review flow.\nWith new detail."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	options := specCommandOptions{diff: true}
+	exitCode := runSpecShowDiff(store, redraft, options, &stdout, &stderr)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "@@") || !strings.Contains(stdout.String(), "With new detail.") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunSpecShowDiffRequiresDraft(t *testing.T) {
+	// runSpecShowDiff's first check is purely on SessionKind, not SpecStatus -
+	// approving a draft keeps it SessionKindSpecDraft (only a separate
+	// SessionKindSpecImpl session is created), so this must construct a
+	// genuinely different session kind to exercise the check at all.
+	_, _, draft := seedSpecDraft(t)
+	implSession := draft
+	implSession.SessionKind = sessions.SessionKindSpecImpl
+
+	var stderr bytes.Buffer
+	options := specCommandOptions{diff: true}
+	exitCode := runSpecShowDiff(nil, implSession, options, &bytes.Buffer{}, &stderr)
+
+	if exitCode != exitUsage {
+		t.Fatalf("exit = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--diff is only valid for a spec-draft session") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSpecShowDiffRequiresRejectedPredecessor(t *testing.T) {
+	store, _, draft := seedSpecDraft(t)
+
+	options := specCommandOptions{diff: true}
+	var stderr bytes.Buffer
+	exitCode := runSpecShowDiff(store, draft, options, &bytes.Buffer{}, &stderr)
+
+	if exitCode != exitUsage {
+		t.Fatalf("exit = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no previous rejected draft found for spec") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSpecShowDiffEmptyDiff(t *testing.T) {
+	store, _, draft := seedSpecDraft(t)
+	rejectDraft(t, store, draft)
+
+	rejected, err := store.Get(draft.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redraft, err := store.Create(sessions.CreateInput{
+		SessionKind:         sessions.SessionKindSpecDraft,
+		Title:               "Review flow",
+		Cwd:                 draft.Cwd,
+		ModelID:             "test-model",
+		Provider:            "test",
+		SpecID:              rejected.SpecID + "-v2",
+		SpecFilePath:        rejected.SpecFilePath + ".v2",
+		SpecStatus:          sessions.SpecStatusDraft,
+		SpecDraftModelID:    "test-model",
+		SpecDraftReasoning:  "high",
+		SpecSourceSessionID: rejected.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redraftPath, err := specmode.ResolveSpecFilePath(redraft.Cwd, redraft.SpecFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// specmode.SaveDraft (used by seedSpecDraft for the "previous" file below)
+	// always appends a trailing newline - match it exactly here so identical
+	// spec content really is byte-identical and yields an empty diff.
+	if err := os.WriteFile(redraftPath, []byte("# Goal\n\nAdd review flow.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	options := specCommandOptions{diff: true}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runSpecShowDiff(store, redraft, options, &stdout, &stderr)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", exitCode, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func rejectDraft(t *testing.T, store *sessions.Store, draft sessions.Metadata) {
+	t.Helper()
+	_, _, err := store.RecordSpec(draft.SessionID, sessions.RecordSpecInput{
+		SpecID:              draft.SpecID,
+		SpecFilePath:        draft.SpecFilePath,
+		SpecStatus:          sessions.SpecStatusRejected,
+		SpecDraftModelID:    draft.SpecDraftModelID,
+		SpecDraftReasoning:  draft.SpecDraftReasoning,
+		SpecRejectReason:    "needs work",
+		SpecSourceSessionID: draft.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestParseSpecRejectsCommandSpecificFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -131,11 +276,21 @@ func TestParseSpecRejectsCommandSpecificFlags(t *testing.T) {
 			args: []string{"approve", "draft", "--reason", "too broad"},
 			want: "--reason is only valid for zero spec reject",
 		},
+		{
+			name: "diff on approve",
+			args: []string{"approve", "draft", "--diff"},
+			want: "--diff is only valid for zero spec show",
+		},
+		{
+			name: "diff on reject",
+			args: []string{"reject", "draft", "--diff"},
+			want: "--diff is only valid for zero spec show",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, _, err := parseSpecArgs(tc.args)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("expected %q validation, got %v", tc.want, err)
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

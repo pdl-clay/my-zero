@@ -753,6 +753,92 @@ func TestRecordSpecUpdatesMetadataAndAppendsEvents(t *testing.T) {
 	}
 }
 
+// SpecDraftPipeline must be stamped on first RecordSpec (the draft), survive
+// later status transitions (approve/reject don't pass it and must not erase
+// it), and be copied onto the implementation session created by
+// EnsureSpecImplementation - this is what lets the spec-compliance completion
+// gate (agent.Options.SpecComplianceGate) restrict itself to deep-plan-drafted
+// specs only (see internal/cli/exec.go, internal/acp/agent.go, internal/tui/model.go).
+func TestSpecDraftPipelinePropagatesThroughApproveAndImplementation(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
+		time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 19, 10, 0, 1, 0, time.UTC),
+		time.Date(2026, 7, 19, 10, 0, 2, 0, time.UTC),
+		time.Date(2026, 7, 19, 10, 0, 3, 0, time.UTC),
+	})})
+	draft, err := store.Create(CreateInput{SessionID: "draft", SessionKind: SessionKindSpecDraft})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	recorded, _, err := store.RecordSpec(draft.SessionID, RecordSpecInput{
+		SpecID:            "2026-07-19-spec",
+		SpecFilePath:      "/repo/.zero/specs/2026-07-19-spec.md",
+		SpecStatus:        SpecStatusDraft,
+		SpecDraftPipeline: SpecDraftPipelineDeepPlan,
+	})
+	if err != nil {
+		t.Fatalf("RecordSpec draft: %v", err)
+	}
+	if recorded.SpecDraftPipeline != SpecDraftPipelineDeepPlan {
+		t.Fatalf("SpecDraftPipeline = %q after draft record, want %q", recorded.SpecDraftPipeline, SpecDraftPipelineDeepPlan)
+	}
+
+	// Approve does not pass SpecDraftPipeline (only the initial draft record
+	// does) - it must survive untouched, not be blanked out.
+	approved, _, err := store.RecordSpec(draft.SessionID, RecordSpecInput{SpecStatus: SpecStatusApproved})
+	if err != nil {
+		t.Fatalf("RecordSpec approve: %v", err)
+	}
+	if approved.SpecDraftPipeline != SpecDraftPipelineDeepPlan {
+		t.Fatalf("SpecDraftPipeline = %q after approve, want it to survive as %q", approved.SpecDraftPipeline, SpecDraftPipelineDeepPlan)
+	}
+
+	impl, _, err := store.EnsureSpecImplementation(EnsureSpecImplementationInput{
+		SpecID:              "2026-07-19-spec",
+		SpecFilePath:        "/repo/.zero/specs/2026-07-19-spec.md",
+		SpecSourceSessionID: draft.SessionID,
+		Prompt:              "Implement the approved spec.",
+		SpecDraftPipeline:   approved.SpecDraftPipeline,
+	})
+	if err != nil {
+		t.Fatalf("EnsureSpecImplementation: %v", err)
+	}
+	if impl.SpecDraftPipeline != SpecDraftPipelineDeepPlan {
+		t.Fatalf("implementation session SpecDraftPipeline = %q, want %q", impl.SpecDraftPipeline, SpecDraftPipelineDeepPlan)
+	}
+
+	// A mono draft (no SpecDraftPipeline passed) must leave the field empty
+	// end to end - the gate-restriction condition depends on this staying "".
+	monoDraft, err := store.Create(CreateInput{SessionID: "mono-draft", SessionKind: SessionKindSpecDraft})
+	if err != nil {
+		t.Fatalf("Create mono draft: %v", err)
+	}
+	monoRecorded, _, err := store.RecordSpec(monoDraft.SessionID, RecordSpecInput{
+		SpecID:       "2026-07-19-mono-spec",
+		SpecFilePath: "/repo/.zero/specs/2026-07-19-mono-spec.md",
+		SpecStatus:   SpecStatusDraft,
+	})
+	if err != nil {
+		t.Fatalf("RecordSpec mono draft: %v", err)
+	}
+	if monoRecorded.SpecDraftPipeline != "" {
+		t.Fatalf("mono draft SpecDraftPipeline = %q, want empty", monoRecorded.SpecDraftPipeline)
+	}
+	monoImpl, _, err := store.EnsureSpecImplementation(EnsureSpecImplementationInput{
+		SpecID:              "2026-07-19-mono-spec",
+		SpecFilePath:        "/repo/.zero/specs/2026-07-19-mono-spec.md",
+		SpecSourceSessionID: monoDraft.SessionID,
+		Prompt:              "Implement the approved spec.",
+	})
+	if err != nil {
+		t.Fatalf("EnsureSpecImplementation mono: %v", err)
+	}
+	if monoImpl.SpecDraftPipeline != "" {
+		t.Fatalf("mono implementation session SpecDraftPipeline = %q, want empty", monoImpl.SpecDraftPipeline)
+	}
+}
+
 func TestEnsureSpecImplementationReusesExistingPromptSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
 		time.Date(2026, 6, 8, 11, 0, 0, 0, time.UTC),

@@ -62,6 +62,35 @@ func TestCollapseRuneSafeTruncation(t *testing.T) {
 	}
 }
 
+// TestBoundedResultPreservesStructureUnlikeCollapse guards a regression found
+// while validating the deep-plan checker: swarm_collect used to run every
+// task's Result through collapse(), whose 200-rune cap (meant for
+// swarm_status's compact overview) silently cut a detailed markdown report -
+// headers, a claim-by-claim table, the actual "current version is X" finding -
+// down to a sentence fragment before the orchestrator ever saw it, and
+// flattened newlines made even that fragment hard to read.
+func TestBoundedResultPreservesStructureUnlikeCollapse(t *testing.T) {
+	report := "## Checker findings\n\n- v5.2.1 is outdated, current is v5.3.1\n- source: https://github.com/golang-jwt/jwt/releases"
+	got := boundedResult(report)
+	if got != report {
+		t.Fatalf("boundedResult must return a short report unchanged (newlines intact), got %q", got)
+	}
+}
+
+func TestBoundedResultRuneSafeTruncationWithMarker(t *testing.T) {
+	long := strings.Repeat("a", resultOutputBudgetRunes+500)
+	got := boundedResult(long)
+	if !utf8.ValidString(got) {
+		t.Fatalf("boundedResult produced invalid UTF-8")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Fatalf("boundedResult must mark truncation explicitly (unlike a silent cut), got suffix %q", got[len(got)-60:])
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", resultOutputBudgetRunes)) {
+		t.Fatal("boundedResult must keep the first resultOutputBudgetRunes characters intact")
+	}
+}
+
 func newToolSwarm(t *testing.T, l MemberLauncher) (*tools.Registry, *Swarm) {
 	t.Helper()
 	sw := newSwarmFor(t, l)
@@ -112,6 +141,39 @@ func TestSpawnToolRequiresPermission(t *testing.T) {
 	}, tools.RunOptions{})
 	if res.Status != tools.StatusError || !strings.Contains(res.Output, "Permission required") {
 		t.Fatalf("ungranted spawn should be refused, got status=%v output=%q", res.Status, res.Output)
+	}
+}
+
+func TestSpawnToolPermissionForArgs(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	if err := sw.Registry().Register(Definition{AgentType: "readonly-role", Tools: []string{"read_file", "glob", "grep"}}); err != nil {
+		t.Fatalf("register readonly-role: %v", err)
+	}
+	if err := sw.Registry().Register(Definition{AgentType: "network-role", Tools: []string{"read_file", "web_fetch"}, NetworkUnsafe: true}); err != nil {
+		t.Fatalf("register network-role: %v", err)
+	}
+	tool := &spawnTool{sw: sw}
+	cases := []struct {
+		name string
+		args map[string]any
+		want tools.Permission
+	}{
+		{"read-only definition auto-approves", map[string]any{"agent_type": "readonly-role"}, tools.PermissionAllow},
+		{"read-only-plus-network definition auto-approves", map[string]any{"agent_type": "network-role"}, tools.PermissionAllow},
+		{"write-capable teammate still prompts", map[string]any{"agent_type": "teammate"}, tools.PermissionPrompt},
+		{"unknown agent type prompts", map[string]any{"agent_type": "ghost"}, tools.PermissionPrompt},
+		{"missing agent_type prompts", map[string]any{}, tools.PermissionPrompt},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tool.PermissionForArgs(tc.args); got != tc.want {
+				t.Fatalf("PermissionForArgs(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+
+	if got := (&spawnTool{}).PermissionForArgs(map[string]any{"agent_type": "readonly-role"}); got != tools.PermissionPrompt {
+		t.Fatalf("a spawnTool with no swarm must fail safe to prompt, got %q", got)
 	}
 }
 

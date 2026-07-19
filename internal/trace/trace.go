@@ -41,18 +41,19 @@ const (
 
 // Counter names. Emitted as {"type":"counter","name":"tool_calls","value":7}.
 const (
-	CounterModelRequests     = "model_requests"
-	CounterToolCalls         = "tool_calls"
-	CounterRetryCount        = "retry_count"
-	CounterReconnectCount    = "reconnect_count"
-	CounterCompactionCount   = "compaction_count"
-	CounterCompletionNudges  = "completion_nudges"
-	CounterAcceptanceChecks  = "acceptance_checks"
-	CounterPollingTurn       = "polling_turn"
-	CounterModelSwitches     = "model_switches"
-	CounterInputTokens       = "input_tokens"
-	CounterCachedInputTokens = "cached_input_tokens"
-	CounterOutputTokens      = "output_tokens"
+	CounterModelRequests        = "model_requests"
+	CounterToolCalls            = "tool_calls"
+	CounterRetryCount           = "retry_count"
+	CounterReconnectCount       = "reconnect_count"
+	CounterCompactionCount      = "compaction_count"
+	CounterCompletionNudges     = "completion_nudges"
+	CounterAcceptanceChecks     = "acceptance_checks"
+	CounterSpecComplianceNudges = "spec_compliance_nudges"
+	CounterPollingTurn          = "polling_turn"
+	CounterModelSwitches        = "model_switches"
+	CounterInputTokens          = "input_tokens"
+	CounterCachedInputTokens    = "cached_input_tokens"
+	CounterOutputTokens         = "output_tokens"
 )
 
 // Span is one named wall interval attributed to part of a run. Each stamp is
@@ -227,6 +228,7 @@ func OptionalEventKeys() []string {
 		"counter:" + CounterCompactionCount,
 		"counter:" + CounterCompletionNudges,
 		"counter:" + CounterAcceptanceChecks,
+		"counter:" + CounterSpecComplianceNudges,
 		"counter:" + CounterPollingTurn,
 		"counter:" + CounterModelSwitches,
 	}

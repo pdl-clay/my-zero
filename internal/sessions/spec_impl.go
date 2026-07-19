@@ -19,6 +19,7 @@ type EnsureSpecImplementationInput struct {
 	SpecSourceSessionID string
 	RootSessionID       string
 	Prompt              string
+	SpecDraftPipeline   string
 }
 
 func (store *Store) FindSpecImplementation(specID string, sourceSessionID string) (*Metadata, error) {
@@ -93,6 +94,7 @@ func (store *Store) EnsureSpecImplementation(input EnsureSpecImplementationInput
 			SpecDraftReasoning:  input.SpecDraftReasoning,
 			SpecUserComment:     input.SpecUserComment,
 			SpecSourceSessionID: sourceSessionID,
+			SpecDraftPipeline:   input.SpecDraftPipeline,
 		})
 		if err != nil {
 			return Metadata{}, nil, err

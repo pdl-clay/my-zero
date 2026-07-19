@@ -30,6 +30,15 @@ type Metadata struct {
 	Model           string   `json:"model,omitempty"`
 	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	Tools           []string `json:"tools,omitempty"`
+	// NetworkUnsafe requests the autonomy escalation in BuildArgs/BuildResumeArgs
+	// that lets this specialist reach network tools (web_fetch/web_search) in a
+	// headless run. Deliberately absent from knownMetadataKeys and unhandled in
+	// manifestFromRaw/mergeExtends: no markdown frontmatter (built-in, project,
+	// or user) can ever set this — it is only ever assigned as a Go literal on
+	// the built-in deep-plan-checker definition. A project/user manifest that
+	// overrides that name by filename gets a fresh Manifest whose field defaults
+	// false, so a user-authored specialist can never grant itself this.
+	NetworkUnsafe bool `json:"-"`
 }
 
 type Manifest struct {

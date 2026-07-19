@@ -3167,6 +3167,133 @@ func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
 	}
 }
 
+// stubNamedTool is a minimal tools.Tool used to test toolAdvertisedInDeepPlan
+// against tool names/Safety shapes that mirror internal/swarm and
+// internal/specialist's real tools, without importing those packages here
+// (they are not currently agent-package test dependencies).
+type stubNamedTool struct {
+	name   string
+	safety tools.Safety
+}
+
+func (t stubNamedTool) Name() string             { return t.name }
+func (t stubNamedTool) Description() string      { return "stub" }
+func (t stubNamedTool) Parameters() tools.Schema { return tools.Schema{} }
+func (t stubNamedTool) Safety() tools.Safety     { return t.safety }
+func (t stubNamedTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+
+func registerDeepPlanStubSwarmTools(registry *tools.Registry) {
+	// Mirrors real Safety() shapes from internal/swarm/tools.go and
+	// internal/specialist/task_tool.go, standing in for the real tools so this
+	// test doesn't need to import those packages.
+	for _, tool := range []stubNamedTool{
+		{name: "swarm_spawn", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+		{name: "swarm_collect", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow, AdvertiseInAuto: true}},
+		{name: "swarm_send", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionAllow, AdvertiseInAuto: true}},
+		{name: "swarm_inbox", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow, AdvertiseInAuto: true}},
+		{name: "swarm_status", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow, AdvertiseInAuto: true}},
+		{name: "swarm_handoff", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+		{name: "swarm_schedule", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+		{name: "Task", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+		{name: "TaskOutput", safety: tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow, AdvertiseInAuto: true}},
+		{name: "TaskStop", safety: tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+		{name: "GenerateSpecialist", safety: tools.Safety{SideEffect: tools.SideEffectWrite, Permission: tools.PermissionPrompt, AdvertiseInAuto: true}},
+	} {
+		registry.Register(tool)
+	}
+}
+
+func TestDeepPlanAdvertisesSpawnCollectButHidesTaskAndNetwork(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(root) {
+		registry.Register(tool)
+	}
+	specmode.RegisterDraftTools(registry, root, nil)
+	registerDeepPlanStubSwarmTools(registry)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "deep plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeDeepPlan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, definition := range provider.requests[0].Tools {
+		names[definition.Name] = true
+	}
+	for _, want := range []string{"ask_user", specmode.SubmitToolName, "swarm_spawn", "swarm_collect"} {
+		if !names[want] {
+			t.Fatalf("deep-plan tools missing %q from %#v", want, names)
+		}
+	}
+	// read_file/glob/grep/list_directory are deliberately NOT advertised: the
+	// deep-plan orchestrator must get every workspace fact from a spawned
+	// deep-plan-explorer, never from its own direct investigation (see
+	// toolAdvertisedInDeepPlan's doc comment).
+	for _, denied := range []string{
+		"write_file", "edit_file", "apply_patch", "bash", "update_plan", "web_fetch", "web_search",
+		"read_file", "list_directory", "glob", "grep", "read_minified_file",
+		"Task", "TaskOutput", "TaskStop", "GenerateSpecialist",
+		"swarm_send", "swarm_inbox", "swarm_status", "swarm_handoff", "swarm_schedule",
+	} {
+		if names[denied] {
+			t.Fatalf("deep-plan advertised denied tool %q in %#v", denied, names)
+		}
+	}
+}
+
+func TestDeepPlanDeniesHiddenToolCalls(t *testing.T) {
+	registry := tools.NewRegistry()
+	registerDeepPlanStubSwarmTools(registry)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "Task"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"name":"worker","prompt":"do it"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "deep plan", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeDeepPlan,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in deep-plan mode") {
+		t.Fatalf("expected deep-plan Task denial, got %q", denied)
+	}
+}
+
 func TestRunStopsWhenSubmitSpecReturnsReviewControl(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

@@ -21,6 +21,11 @@ var ignoredDirectories = map[string]bool{
 	".cache":       true,
 	"tmp":          true,
 	"temp":         true,
+	// Go build/module caches some projects redirect into the repo root (see
+	// .gitignore); vendored dependency sources under these dirs dwarf project
+	// source in file count and drown it out of truncated glob/grep results.
+	".gocache":    true,
+	".gomodcache": true,
 }
 
 func normalizeWorkspaceRoot(workspaceRoot string) string {

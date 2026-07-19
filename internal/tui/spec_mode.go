@@ -14,9 +14,26 @@ import (
 )
 
 func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
+	return m.handleSpecDraftCommand(task, false)
+}
+
+// handleDeepPlanCommand is the /deep-plan sibling of /spec: same session/
+// review machinery, differing only in permission mode and system prompt (see
+// handleSpecDraftCommand) - the orchestrator additionally fans out to
+// explorer/critic/checker specialists via swarm_spawn/swarm_collect before
+// consolidating and calling submit_spec.
+func (m model) handleDeepPlanCommand(task string) (tea.Model, tea.Cmd) {
+	return m.handleSpecDraftCommand(task, true)
+}
+
+func (m model) handleSpecDraftCommand(task string, deepPlan bool) (tea.Model, tea.Cmd) {
+	commandName := "/spec"
+	if deepPlan {
+		commandName = "/deep-plan"
+	}
 	task = strings.TrimSpace(task)
 	if task == "" {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Usage: /spec <task>"})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Usage: " + commandName + " <task>"})
 		return m, nil
 	}
 	// m.exiting guards the post-Ctrl+C flush window: starting a run there would
@@ -35,7 +52,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/spec " + task})
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: commandName + " " + task})
 	var err error
 	m, err = m.createSpecDraftSession(task)
 	if err != nil {
@@ -66,13 +83,26 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 	m.pendingImageLabels = nil
 
 	specRegistry := cloneToolRegistry(m.registry)
-	specmode.RegisterDraftTools(specRegistry, m.cwd, m.now)
+	permissionMode := agent.PermissionModeSpecDraft
+	systemPrompt := specmode.DraftSystemPrompt
+	if deepPlan {
+		// swarm_spawn/swarm_collect are already registered into specRegistry
+		// unconditionally at TUI startup (registerSpecialistTools); ToolAdvertised's
+		// deep-plan branch is what actually surfaces them for this run. submit_spec
+		// is additionally gated on the review team having been collected at least
+		// once (see specmode.NewDeepPlanSubmitTool).
+		permissionMode = agent.PermissionModeDeepPlan
+		systemPrompt = specmode.DeepPlanSystemPrompt
+		specmode.RegisterDeepPlanTools(specRegistry, m.cwd, m.now, m.specReviewGate)
+	} else {
+		specmode.RegisterDraftTools(specRegistry, m.cwd, m.now)
+	}
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
 	return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, task, turnImages, tuiAgentRunOptions{
 		registry:       specRegistry,
-		permissionMode: agent.PermissionModeSpecDraft,
-		systemPrompt:   specmode.DraftSystemPrompt,
+		permissionMode: permissionMode,
+		systemPrompt:   systemPrompt,
 		specDraft:      true,
 	}), m.spinner.Tick)
 }
@@ -95,7 +125,16 @@ func (m model) createSpecDraftSession(task string) (model, error) {
 	return m, nil
 }
 
-func tuiSpecReviewFromToolResult(result agent.ToolResult, draftSessionID string) (pendingSpecReviewPrompt, bool) {
+// tuiSpecDraftPipelineValue returns the sessions.Metadata.SpecDraftPipeline
+// value for a draft that ran (or didn't) under PermissionModeDeepPlan.
+func tuiSpecDraftPipelineValue(deepPlan bool) string {
+	if deepPlan {
+		return sessions.SpecDraftPipelineDeepPlan
+	}
+	return ""
+}
+
+func tuiSpecReviewFromToolResult(result agent.ToolResult, draftSessionID string, deepPlan bool) (pendingSpecReviewPrompt, bool) {
 	if result.Name != specmode.SubmitToolName || result.Meta["control"] != specmode.ControlSpecReviewRequired {
 		return pendingSpecReviewPrompt{}, false
 	}
@@ -105,6 +144,7 @@ func tuiSpecReviewFromToolResult(result agent.ToolResult, draftSessionID string)
 		SpecFilePath:   strings.TrimSpace(result.Meta["specFilePath"]),
 		RelativePath:   strings.TrimSpace(result.Meta["relativePath"]),
 		DraftSessionID: strings.TrimSpace(draftSessionID),
+		DeepPlan:       deepPlan,
 	}, true
 }
 
@@ -115,6 +155,7 @@ func (m model) activateSpecReview(review pendingSpecReviewPrompt) model {
 		SpecStatus:         sessions.SpecStatusDraft,
 		SpecDraftModelID:   m.modelName,
 		SpecDraftReasoning: string(m.reasoningEffort),
+		SpecDraftPipeline:  tuiSpecDraftPipelineValue(review.DeepPlan),
 	})
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "spec record error: " + err.Error()})
@@ -180,6 +221,7 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 		SpecDraftReasoning:  string(m.reasoningEffort),
 		SpecSourceSessionID: review.DraftSessionID,
 		Prompt:              prompt,
+		SpecDraftPipeline:   tuiSpecDraftPipelineValue(review.DeepPlan),
 	})
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})

@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -42,16 +43,24 @@ type Options struct {
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry
-	SessionStore                *sessions.Store
-	SandboxStore                *sandbox.GrantStore
-	MCPConfig                   config.MCPConfig
-	MCPPermissionStore          *mcp.PermissionStore
-	MCPTokenStore               *mcp.TokenStore
-	MCPCommand                  func(context.Context, []string) MCPCommandResult
-	SandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	UsageTracker                *usage.Tracker
-	SessionCompactor            SessionCompactor
-	PrService                   *PrService
+	// SpecReviewGate lets deep-plan mode's submit_spec refuse to run until the
+	// review team (critics + checker) has actually been collected at least
+	// once (see specmode.NewDeepPlanSubmitTool). Nil disables that check.
+	SpecReviewGate specmode.ReviewGate
+	// SpecComplianceGate wires the spec-implementation completion gate for any
+	// spec-impl session the TUI resumes/continues (see approveSpecReview,
+	// agent.Options.SpecComplianceGate). Nil disables that check.
+	SpecComplianceGate  agent.ComplianceGate
+	SessionStore        *sessions.Store
+	SandboxStore        *sandbox.GrantStore
+	MCPConfig           config.MCPConfig
+	MCPPermissionStore  *mcp.PermissionStore
+	MCPTokenStore       *mcp.TokenStore
+	MCPCommand          func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand func(context.Context) SandboxSetupCommandResult
+	UsageTracker        *usage.Tracker
+	SessionCompactor    SessionCompactor
+	PrService           *PrService
 
 	AgentOptions agent.Options
 	// LoadSkills returns the installed skills (default skills dir merged with any

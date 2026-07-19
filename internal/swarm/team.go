@@ -78,6 +78,7 @@ type Swarm struct {
 	taskCwd   map[string]string // taskID -> cwd, for handoff/adoption relaunch
 	scheduler *Scheduler        // lazily created by Scheduler(); nil until first use
 	idSeq     atomic.Uint64
+	collected map[string]bool // sanitized team name -> Collect/CollectWait returned >=1 task at least once
 }
 
 // Team is a named set of concurrently-running members with a bounded slot count
@@ -242,19 +243,20 @@ func resolvePermissionMode(pol Policy, def Definition) string {
 const (
 	permissionModeAsk       = "ask"        // prompts for every tool (most restrictive)
 	permissionModeSpecDraft = "spec-draft" // spec-drafting only
+	permissionModeDeepPlan  = "deep-plan"  // spec-drafting via a multi-agent explore/critique/consolidate pipeline
 	permissionModeAuto      = "auto"       // auto-approve low-risk
 	permissionModeUnsafe    = "unsafe"     // approve everything (most permissive)
 )
 
 // permissionRank orders permission modes from least to most permissive so the
 // swarm can clamp a member to no more than its parent. Unknown/empty modes rank
-// as the strictest (0) so they never accidentally widen access. spec-draft
-// (which scopes a child to spec tooling) ranks below ask: it never grants more
-// authority than prompting-for-everything, so a spec-draft parent clamps members
-// hardest among the known modes.
+// as the strictest (0) so they never accidentally widen access. spec-draft and
+// deep-plan (which scope a child to spec tooling / spawn+collect) rank below
+// ask: they never grant more authority than prompting-for-everything, so a
+// spec-draft or deep-plan parent clamps members hardest among the known modes.
 func permissionRank(mode string) int {
 	switch strings.TrimSpace(mode) {
-	case permissionModeSpecDraft:
+	case permissionModeSpecDraft, permissionModeDeepPlan:
 		return 1
 	case permissionModeAsk:
 		return 2
@@ -379,6 +381,8 @@ func (s *Swarm) buildSpec(pol Policy, memberID, taskID, team string, def Definit
 		Model:           resolveModel(pol, def),
 		PermissionMode:  resolvePermissionMode(pol, def),
 		SystemPrompt:    prompt,
+		Tools:           def.Tools,
+		NetworkUnsafe:   def.NetworkUnsafe,
 		ParentSessionID: pol.SessionID,
 	}
 }

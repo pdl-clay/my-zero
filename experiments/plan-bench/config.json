@@ -1,10 +1,8 @@
 {
-  "_comment": "Fill in real model ids that your `zero` provider config accepts (same strings you'd pass to `zero exec -m <model>`). judge_model should be a stronger/more reliable model than the ones under test, kept fixed across the whole benchmark so scoring doesn't favor whichever cheap model happens to grade itself.",
-  "repo_path": ".",
-  "judge_model": "CHANGE_ME_strong_judge_model",
+  "_comment": "Judging is done by hand (Claude reads prompts/judge.txt and scores each saved spec) instead of a zero exec call - step-3.5-flash wasn't reliable enough as an automated judge. Add more entries to models_under_test as more providers/quota become available (e.g. opencode-go once its monthly cap resets).",
+  "repo_path": "../..",
   "models_under_test": [
-    "CHANGE_ME_small_model_a",
-    "CHANGE_ME_small_model_b"
+    {"provider": "stepfun-plan", "model": "step-3.7-flash"}
   ],
   "variants": ["mono", "explore_critique", "full"],
   "explorer_count": 2,
@@ -15,12 +13,11 @@
   "critic_personas": ["critic_logic", "critic_security"],
   "draft_reasoning_effort": "low",
   "max_turns": {
-    "explorer": 10,
-    "critic": 8,
-    "checker": 10,
-    "draft": 25,
-    "judge": 10
+    "explorer": 40,
+    "critic": 35,
+    "checker": 40,
+    "draft": 40
   },
-  "timeout_seconds": 600,
-  "parallel_workers": 4
+  "timeout_seconds": 900,
+  "parallel_workers": 3
 }

@@ -125,6 +125,91 @@ func TestSubmitToolRejectsInvalidArgs(t *testing.T) {
 	}
 }
 
+// fakeReviewGate is a minimal ReviewGate for testing NewDeepPlanSubmitTool's
+// gate without depending on internal/swarm.
+type fakeReviewGate struct {
+	collected map[string]bool
+}
+
+func (g fakeReviewGate) HasCollected(team string) bool { return g.collected[team] }
+
+func TestDeepPlanSubmitToolBlocksUntilReviewCollected(t *testing.T) {
+	gate := fakeReviewGate{collected: map[string]bool{}}
+	tool := NewDeepPlanSubmitTool(t.TempDir(), fixedSpecTime("2026-06-08T11:00:00Z"), gate)
+
+	result := tool.Run(context.Background(), map[string]any{
+		"title": "Implementation Plan",
+		"plan":  "# Goal\n\nAdd implementation plan.",
+	})
+	if result.Status != tools.StatusError {
+		t.Fatalf("expected submit_spec to be blocked before review collected, got status=%s output=%s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, DeepPlanReviewTeam) {
+		t.Fatalf("blocked output should name the required team %q, got %q", DeepPlanReviewTeam, result.Output)
+	}
+}
+
+const testPlanWithReviewerFindings = "# Goal\n\nAdd implementation plan.\n\n## Reviewer findings and resolutions\n- deep-plan-critic-logic found no issues.\n"
+
+func TestDeepPlanSubmitToolAllowsAfterReviewCollected(t *testing.T) {
+	gate := fakeReviewGate{collected: map[string]bool{DeepPlanReviewTeam: true}}
+	root := t.TempDir()
+	tool := NewDeepPlanSubmitTool(root, fixedSpecTime("2026-06-08T11:00:00Z"), gate)
+
+	result := tool.Run(context.Background(), map[string]any{
+		"title": "Implementation Plan",
+		"plan":  testPlanWithReviewerFindings,
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("expected submit_spec to succeed once review was collected, got status=%s output=%s", result.Status, result.Output)
+	}
+}
+
+func TestDeepPlanSubmitToolNilGateDisablesCollectCheck(t *testing.T) {
+	root := t.TempDir()
+	tool := NewDeepPlanSubmitTool(root, fixedSpecTime("2026-06-08T11:00:00Z"), nil)
+
+	result := tool.Run(context.Background(), map[string]any{
+		"title": "Implementation Plan",
+		"plan":  testPlanWithReviewerFindings,
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("a nil gate must disable the collect check rather than block forever, got status=%s output=%s", result.Status, result.Output)
+	}
+}
+
+func TestDeepPlanSubmitToolRequiresReviewerFindingsSection(t *testing.T) {
+	gate := fakeReviewGate{collected: map[string]bool{DeepPlanReviewTeam: true}}
+	tool := NewDeepPlanSubmitTool(t.TempDir(), fixedSpecTime("2026-06-08T11:00:00Z"), gate)
+
+	// The review round genuinely ran (gate satisfied), but the plan never
+	// documents it - this is the exact silent-fold gap found in production
+	// (2/10 deep-plan runs did this even though swarm_collect(review) happened).
+	result := tool.Run(context.Background(), map[string]any{
+		"title": "Implementation Plan",
+		"plan":  "# Goal\n\nAdd implementation plan.\n\n## Risks and edge cases\nNone.\n",
+	})
+	if result.Status != tools.StatusError {
+		t.Fatalf("expected submit_spec to be blocked without a reviewer findings section, got status=%s output=%s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, DeepPlanReviewSectionHeading) {
+		t.Fatalf("blocked output should name the required section %q, got %q", DeepPlanReviewSectionHeading, result.Output)
+	}
+}
+
+func TestDeepPlanSubmitToolReviewerFindingsSectionIsCaseInsensitive(t *testing.T) {
+	gate := fakeReviewGate{collected: map[string]bool{DeepPlanReviewTeam: true}}
+	tool := NewDeepPlanSubmitTool(t.TempDir(), fixedSpecTime("2026-06-08T11:00:00Z"), gate)
+
+	result := tool.Run(context.Background(), map[string]any{
+		"title": "Implementation Plan",
+		"plan":  "# Goal\n\n## REVIEWER FINDINGS AND RESOLUTIONS\n- none.\n",
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("heading match must be case-insensitive, got status=%s output=%s", result.Status, result.Output)
+	}
+}
+
 func TestLoadSpecFileRejectsPathsOutsideSpecDirectory(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(root, "notes.md")

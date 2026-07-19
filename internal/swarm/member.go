@@ -23,6 +23,10 @@ type MemberSpec struct {
 	Model          string // resolved (never the "inherit" sentinel)
 	PermissionMode string
 	SystemPrompt   string
+	// Tools and NetworkUnsafe carry the originating Definition's fields through
+	// to the launcher unchanged — see Definition.Tools/NetworkUnsafe.
+	Tools         []string
+	NetworkUnsafe bool
 	// ParentSessionID is the orchestrator's zero session id (from
 	// Policy.SessionID), threaded to the launcher so the member's zero session
 	// is created with --calling-session-id, linking it back to its

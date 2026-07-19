@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Spawn registers a task and launches a member of agentType to run it under the
@@ -176,6 +177,7 @@ func (s *Swarm) Collect(teamName string) []Task {
 			out = append(out, task)
 		}
 	}
+	s.markCollected(team, len(out))
 	return out
 }
 
@@ -184,5 +186,66 @@ func (s *Swarm) Collect(teamName string) []Task {
 // orchestrator gets final results in a single call instead of polling
 // swarm_status repeatedly while members are still running.
 func (s *Swarm) CollectWait(ctx context.Context, teamName string) []Task {
-	return s.coord.WaitSettled(ctx, sanitizeName(teamName))
+	team := sanitizeName(teamName)
+	tasks := s.coord.WaitSettled(ctx, team)
+	s.markCollected(team, len(tasks))
+	return tasks
+}
+
+// markCollected records that a team's tasks were actually retrieved through
+// Collect/CollectWait (not just spawned into), keyed by the already-sanitized
+// team name. A zero-task result does not count — an empty team was never
+// meaningfully collected. HasCollected reads this to let a caller (e.g. the
+// deep-plan submit_spec gate) require that a given team was collected at
+// least once before allowing a terminal action.
+func (s *Swarm) markCollected(team string, taskCount int) {
+	if taskCount == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.collected == nil {
+		s.collected = map[string]bool{}
+	}
+	s.collected[team] = true
+}
+
+// TeamVerdict returns the concatenated Task.Result (plus any Task.Err) for
+// every task ever spawned into teamName, joined with a separator, together
+// with whether that team has actually been retrieved via Collect/CollectWait
+// at least once (see HasCollected). collected is false — and text is empty —
+// until the model has actually run swarm_collect on this team; a caller must
+// not trust results from a team that was only spawned into, since spawning
+// alone says nothing about whether the work finished or was ever looked at.
+// Satisfies agent.ComplianceGate structurally (agent does not import swarm).
+func (s *Swarm) TeamVerdict(teamName string) (text string, collected bool) {
+	if !s.HasCollected(teamName) {
+		return "", false
+	}
+	team := sanitizeName(teamName)
+	var sb strings.Builder
+	for _, task := range s.coord.List() {
+		if task.Team != team {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n---\n")
+		}
+		sb.WriteString(task.Result)
+		if task.Err != "" {
+			sb.WriteString("\nerror: ")
+			sb.WriteString(task.Err)
+		}
+	}
+	return sb.String(), true
+}
+
+// HasCollected reports whether Collect/CollectWait has ever returned at least
+// one task for the given team name in this Swarm's lifetime. teamName is
+// sanitized the same way Spawn/Collect key their teams, so callers can pass
+// the raw name a model used in swarm_spawn/swarm_collect.
+func (s *Swarm) HasCollected(teamName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.collected[sanitizeName(teamName)]
 }

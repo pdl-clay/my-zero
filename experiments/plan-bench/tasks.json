@@ -1,10 +1,42 @@
 [
   {
-    "id": "example-1",
-    "prompt": "REPLACE ME: describe a real, medium-complexity task from this repo, the kind you'd normally hand to plan mode. One or two sentences, same as what a user would type."
+    "id": "ping-command",
+    "prompt": "Add a `zero ping` subcommand that just prints \"pong\" and exits 0. No flags, no network calls."
   },
   {
-    "id": "example-2",
-    "prompt": "REPLACE ME: a second real task. Aim for 10-15 tasks total covering a mix of difficulty (a couple of trivial ones, a couple that touch several files, one or two genuinely ambiguous ones) so the benchmark doesn't only measure the easy case."
+    "id": "setup-literal-key",
+    "prompt": "`zero setup <provider>` only accepts a credential via --api-key-env (an env var name it reads at setup time). Add a --api-key flag so a user can pass the literal key value directly instead of having to export an env var first."
+  },
+  {
+    "id": "spec-list-command",
+    "prompt": "Add a `zero spec list` command that prints every draft/approved/rejected spec across all sessions (id, status, title, cwd), similar in spirit to `zero spec show/approve/reject`."
+  },
+  {
+    "id": "usage-cost-estimate",
+    "prompt": "`zero exec -o json` emits prompt_tokens/completion_tokens usage events but no dollar cost. Add an estimated USD cost field to those usage events, using a static per-model price table."
+  },
+  {
+    "id": "max-cost-flag",
+    "prompt": "Add a --max-cost <usd> flag to `zero exec` that aborts the run once cumulative token cost for that run crosses the given threshold, instead of running until --max-turns."
+  },
+  {
+    "id": "provider-auth-error-message",
+    "prompt": "When a configured provider's API key is invalid or expired, the current error is a generic auth failure. Improve it so the user immediately knows which provider profile is broken and what to do next (e.g. re-run zero setup with a fresh key)."
+  },
+  {
+    "id": "rate-limit-backoff",
+    "prompt": "Some providers return HTTP 429 under load. Add automatic retry with backoff for 429 responses in the provider request path, bounded so it doesn't retry forever."
+  },
+  {
+    "id": "cancel-specialist-mid-task",
+    "prompt": "There's currently no way to cancel a running specialist/swarm member once it's been spawned short of killing the whole zero process. Add a way to cancel a specific in-flight specialist task."
+  },
+  {
+    "id": "spec-show-diff",
+    "prompt": "After a spec draft is rejected and redrafted, `zero spec show` only shows the latest version. Add a --diff flag that shows what changed between the rejected draft and the new one."
+  },
+  {
+    "id": "provider-catalog-new-vendor",
+    "prompt": "Add a new AI provider to the catalog for a fictional OpenAI-compatible vendor called \"Acme AI\" (base URL https://api.acme.ai/v1, default model acme-large, API key env ACME_API_KEY), following the same pattern as existing catalog entries, so it shows up in `zero setup`'s provider list."
   }
 ]

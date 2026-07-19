@@ -36,6 +36,28 @@ func TestIsReadOnlySpecialist(t *testing.T) {
 	}
 }
 
+func TestIsNetworkSafeTools(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools []string
+		want  bool
+	}{
+		{"read-only tools are network-safe (subset)", []string{"read_file", "grep", "glob"}, true},
+		{"read-only plus web_fetch is network-safe", []string{"read_file", "glob", "grep", "web_fetch"}, true},
+		{"read-only plus web_search is network-safe", []string{"read_file", "web_search"}, true},
+		{"write_file makes it unsafe", []string{"read_file", "write_file"}, false},
+		{"bash makes it unsafe", []string{"web_fetch", "bash"}, false},
+		{"empty tool list is unsafe", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsNetworkSafeTools(tc.tools); got != tc.want {
+				t.Fatalf("IsNetworkSafeTools(%v) = %v, want %v", tc.tools, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTaskToolPermissionForArgs(t *testing.T) {
 	tool := NewTaskTool(executorWithReadOnlyAndWriteSpecialists())
 	cases := []struct {

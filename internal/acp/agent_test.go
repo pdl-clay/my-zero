@@ -589,6 +589,14 @@ func (f *fakeSpecialistTooling) Close() error {
 	return nil
 }
 
+func (f *fakeSpecialistTooling) ReviewGate() specmode.ReviewGate {
+	return nil
+}
+
+func (f *fakeSpecialistTooling) ComplianceGate() agent.ComplianceGate {
+	return nil
+}
+
 func (f *fakeSpecialistTooling) snapshot() (registerCount int, closed bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

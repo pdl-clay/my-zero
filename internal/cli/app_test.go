@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -1910,5 +1911,28 @@ func TestRunUnknownLoginSuggestsAuthLogin(t *testing.T) {
 	runWithDeps([]string{"frobnicate"}, &stdout, &stderr, appDeps{})
 	if strings.Contains(stderr.String(), "did you mean") {
 		t.Fatalf("stderr = %q, unrelated commands must not get the auth hint", stderr.String())
+	}
+}
+
+func TestShouldRegisterExecSpecialistTools(t *testing.T) {
+	cases := []struct {
+		name    string
+		options execOptions
+		want    bool
+	}{
+		{"deep-plan always registers regardless of autonomy", execOptions{useSpec: true, deepPlan: true, autonomy: "low"}, true},
+		{"plain --use-spec never registers", execOptions{useSpec: true}, false},
+		{"specialist child session never registers", execOptions{tag: specialist.SessionTagSpecialist}, false},
+		{"default low autonomy does not register", execOptions{autonomy: "low"}, false},
+		{"medium autonomy registers", execOptions{autonomy: "medium"}, true},
+		{"high autonomy registers", execOptions{autonomy: "high"}, true},
+		{"--skip-permissions-unsafe registers", execOptions{skipPermissionsUnsafe: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRegisterExecSpecialistTools(tc.options); got != tc.want {
+				t.Fatalf("shouldRegisterExecSpecialistTools(%+v) = %v, want %v", tc.options, got, tc.want)
+			}
+		})
 	}
 }

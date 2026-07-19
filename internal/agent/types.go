@@ -25,6 +25,14 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModeDeepPlan is spec-drafting via a multi-agent pipeline: the
+	// orchestrator may additionally spawn/await swarm members (explorer, critic,
+	// checker specialists) via swarm_spawn/swarm_collect, then still ends by
+	// calling submit_spec exactly like spec-draft. It never advertises Task or
+	// the other swarm_* tools, and never gains web_fetch/web_search itself —
+	// only a checker member (its own subprocess, with its own tool grant) does.
+	// See toolAdvertisedInDeepPlan.
+	PermissionModeDeepPlan PermissionMode = "deep-plan"
 	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
 	// advertises the in-workspace mutators a member needs to build (write/edit +
 	// shell) on top of the Auto set, while the sandbox engine still gates them at
@@ -316,7 +324,32 @@ type Options struct {
 	// false leaves the loop byte-identical, so the interactive TUI is unaffected.
 	RequireCompletionSignal bool
 
+	// SpecComplianceGate, when set together with SpecFilePath, blocks a headless
+	// run's completion (same RequireCompletionSignal chokepoint) until a
+	// spec-compliance-checker specialist has verified the workspace against the
+	// approved spec's concrete decisions — not just that the model claims it
+	// followed the spec. This exists because a spec approved via `zero spec
+	// approve` (mono or deep-plan) is otherwise pure prompt context: nothing
+	// stops the implementing model from silently deviating from a decision the
+	// spec already settled (e.g. picking a different library than the one the
+	// spec named) while still reporting success. nil disables it entirely (the
+	// loop is byte-identical to before) — set only for spec-impl sessions.
+	SpecComplianceGate ComplianceGate
+	// SpecFilePath is the approved spec's file path, passed to the compliance
+	// checker's task so it can read the spec itself (the source of truth, not a
+	// paraphrase) rather than relying on prompt-quoted excerpts.
+	SpecFilePath string
+
 	runPermissions *permissionRunState
+}
+
+// ComplianceGate reports a swarm team's collected verdict text and whether
+// that team has actually been retrieved via swarm_collect at least once —
+// implemented structurally by *swarm.Swarm (internal/agent does not import
+// internal/swarm; see swarm.Swarm.TeamVerdict), the same pattern
+// specmode.ReviewGate uses for the deep-plan submit_spec gate.
+type ComplianceGate interface {
+	TeamVerdict(team string) (text string, collected bool)
 }
 
 type Result struct {

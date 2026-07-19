@@ -345,6 +345,105 @@ func TestCollectScopesToTeam(t *testing.T) {
 	}
 }
 
+func TestHasCollected(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+
+	if sw.HasCollected("review") {
+		t.Fatal("HasCollected(review) must be false before any spawn/collect")
+	}
+
+	a, _ := sw.Spawn(Policy{}, "review", "teammate", "ta", "")
+	waitFor(t, "review task done", func() bool {
+		task, ok := sw.Coordinator().Get(a)
+		return ok && task.Status == StatusDone
+	})
+
+	if sw.HasCollected("review") {
+		t.Fatal("HasCollected(review) must stay false until swarm_collect actually runs")
+	}
+
+	sw.Collect("review")
+	if !sw.HasCollected("review") {
+		t.Fatal("HasCollected(review) must be true after Collect returns a non-empty result")
+	}
+
+	// A distinct, never-spawned team must never read as collected just because
+	// another team was - this is the exact "explore" vs "review" isolation the
+	// deep-plan prompt relies on.
+	if sw.HasCollected("explore") {
+		t.Fatal("HasCollected(explore) must be false - that team was never spawned or collected")
+	}
+}
+
+func TestTeamVerdict(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+
+	if text, collected := sw.TeamVerdict("compliance"); collected || text != "" {
+		t.Fatalf("TeamVerdict(compliance) = (%q, %v) before any spawn/collect, want (\"\", false)", text, collected)
+	}
+
+	a, _ := sw.Spawn(Policy{}, "compliance", "teammate", "check RubyLLM usage", "")
+	waitFor(t, "compliance task done", func() bool {
+		task, ok := sw.Coordinator().Get(a)
+		return ok && task.Status == StatusDone
+	})
+
+	// Spawned but not yet collected: must not leak the result before
+	// swarm_collect actually runs - a caller must not be able to read a task's
+	// Result out from under the model without it calling swarm_collect first.
+	if text, collected := sw.TeamVerdict("compliance"); collected || text != "" {
+		t.Fatalf("TeamVerdict(compliance) = (%q, %v) before Collect, want (\"\", false)", text, collected)
+	}
+
+	sw.Collect("compliance")
+	text, collected := sw.TeamVerdict("compliance")
+	if !collected {
+		t.Fatal("TeamVerdict(compliance) collected must be true after Collect returns a non-empty result")
+	}
+	if !strings.Contains(text, "ok:check RubyLLM usage") {
+		t.Fatalf("TeamVerdict(compliance) text = %q, want it to contain the member's Result", text)
+	}
+
+	// A distinct, never-spawned team must never read as collected.
+	if text, collected := sw.TeamVerdict("review"); collected || text != "" {
+		t.Fatalf("TeamVerdict(review) = (%q, %v), want (\"\", false) - that team was never spawned or collected", text, collected)
+	}
+}
+
+func TestTeamVerdictConcatenatesMultipleTasks(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+
+	a, _ := sw.Spawn(Policy{}, "compliance", "teammate", "task one", "")
+	b, _ := sw.Spawn(Policy{}, "compliance", "teammate", "task two", "")
+	waitFor(t, "both compliance tasks done", func() bool {
+		ta, ok1 := sw.Coordinator().Get(a)
+		tb, ok2 := sw.Coordinator().Get(b)
+		return ok1 && ok2 && ta.Status == StatusDone && tb.Status == StatusDone
+	})
+
+	sw.Collect("compliance")
+	text, collected := sw.TeamVerdict("compliance")
+	if !collected {
+		t.Fatal("TeamVerdict(compliance) collected must be true")
+	}
+	if !strings.Contains(text, "ok:task one") || !strings.Contains(text, "ok:task two") {
+		t.Fatalf("TeamVerdict(compliance) text = %q, want both members' Result concatenated", text)
+	}
+}
+
+func TestHasCollectedIgnoresEmptyCollect(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	// Collecting a team with no members at all must not mark it collected -
+	// an empty result was never meaningfully retrieved.
+	sw.Collect("review")
+	if sw.HasCollected("review") {
+		t.Fatal("HasCollected(review) must be false after collecting an empty/never-spawned team")
+	}
+}
+
 func TestFuncLauncherRecoversPanic(t *testing.T) {
 	// A panic inside a member's Run must surface as that member's error, never
 	// escape the goroutine and crash the orchestrator.

@@ -50,6 +50,7 @@ const (
 	commandLoop
 	commandVoice
 	commandSTTModel
+	commandDeepPlan
 	commandUnknown
 )
 
@@ -228,6 +229,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Draft an implementation spec for review before editing.",
 		kind:        commandSpec,
+	},
+	{
+		name:        "/deep-plan",
+		usage:       "/deep-plan <task>",
+		group:       commandGroupSession,
+		description: "Draft a spec via parallel explorer/critic/fact-check passes before review.",
+		kind:        commandDeepPlan,
 	},
 	{
 		name:        "/init",

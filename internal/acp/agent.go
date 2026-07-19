@@ -67,6 +67,16 @@ type turnRecord struct {
 type acpSession struct {
 	id  string
 	cwd string
+	// sessionKind/specFilePath are set once at registerSession time from the
+	// persisted sessions.Metadata (see handleSessionLoad) and never change
+	// afterward - a session's kind/spec are fixed at creation. Only
+	// SessionKindSpecImpl sessions (created by `zero spec approve`, resumed
+	// here via session/load) ever have a non-empty specFilePath; used to wire
+	// the spec-compliance completion gate the same way `zero exec --resume`
+	// does (internal/cli/exec.go).
+	sessionKind       sessions.SessionKind
+	specFilePath      string
+	specDraftPipeline string
 
 	// turnMu serializes prompt turns for one session: concurrent session/prompt
 	// calls run one at a time so they can't interleave history or clobber the
@@ -209,7 +219,7 @@ func (a *Agent) handleSessionNew(_ context.Context, params json.RawMessage) (any
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess := a.registerSession(meta.SessionID, root, nil)
+	sess := a.registerSession(meta.SessionID, root, nil, meta.SessionKind, meta.SpecFilePath, meta.SpecDraftPipeline)
 	return NewSessionResult{
 		SessionID: sess.id,
 		Modes:     a.modeState(sess),
@@ -237,7 +247,7 @@ func (a *Agent) handleSessionLoad(_ context.Context, params json.RawMessage) (an
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
 	history, historyErr := a.loadHistory(meta.SessionID)
-	sess := a.registerSession(meta.SessionID, root, history)
+	sess := a.registerSession(meta.SessionID, root, history, meta.SessionKind, meta.SpecFilePath, meta.SpecDraftPipeline)
 	a.warnPersistence(
 		&notifier{conn: a.conn, sessionID: sess.id},
 		"load session history",
@@ -314,7 +324,8 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	// per-turn; ensureSpecialists' sync.Once runs at most once per
 	// session).
 	var specialists []agent.SpecialistInfo
-	if tooling := a.ensureSpecialists(sess, resolved); tooling != nil {
+	tooling := a.ensureSpecialists(sess, resolved)
+	if tooling != nil {
 		tooling.RegisterInto(registry)
 		specialists = tooling.Specialists()
 	}
@@ -325,21 +336,39 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	forwardEffort := modelregistry.ForwardedReasoningEffort(modelRegistry, resolved.Provider.CatalogID, resolved.Provider.Model, sess.currentEffort())
 
+	// A resumed spec-implementation session (created by `zero spec approve`,
+	// loaded here via session/load - see registerSession) gets the
+	// spec-compliance completion gate wired, same as `zero exec --resume`
+	// (internal/cli/exec.go). It is currently inert on this surface - the gate
+	// only fires when RequireCompletionSignal is also on, which ACP leaves off
+	// by default the same way the interactive TUI does - but wiring it now
+	// means no further plumbing is needed if that changes later.
+	var specComplianceGate agent.ComplianceGate
+	var specComplianceFilePath string
+	if sess.sessionKind == sessions.SessionKindSpecImpl && sess.specDraftPipeline == sessions.SpecDraftPipelineDeepPlan {
+		specComplianceFilePath = sess.specFilePath
+		if tooling != nil {
+			specComplianceGate = tooling.ComplianceGate()
+		}
+	}
+
 	opts := agent.Options{
-		Cwd:             sess.cwd,
-		SessionID:       sess.id,
-		ProviderName:    resolved.Provider.Name,
-		Model:           resolved.Provider.Model,
-		Registry:        registry,
-		Sandbox:         sandboxEngine,
-		PermissionMode:  mode,
-		MaxTurns:        resolved.MaxTurns,
-		Images:          images,
-		Specialists:     specialists,
-		ReasoningEffort: forwardEffort,
-		OnText:          note.text,
-		OnReasoning:     note.thought,
-		OnToolCall:      note.toolCall,
+		Cwd:                sess.cwd,
+		SessionID:          sess.id,
+		ProviderName:       resolved.Provider.Name,
+		Model:              resolved.Provider.Model,
+		Registry:           registry,
+		Sandbox:            sandboxEngine,
+		PermissionMode:     mode,
+		MaxTurns:           resolved.MaxTurns,
+		Images:             images,
+		Specialists:        specialists,
+		ReasoningEffort:    forwardEffort,
+		SpecComplianceGate: specComplianceGate,
+		SpecFilePath:       specComplianceFilePath,
+		OnText:             note.text,
+		OnReasoning:        note.thought,
+		OnToolCall:         note.toolCall,
 		OnToolResult: func(result agent.ToolResult) {
 			note.toolResult(result)
 			if result.Name == "update_plan" {
@@ -363,9 +392,27 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	// agent.toolAdvertisedInSpecDraft: read-only + ask_user + submit_spec
 	// only), so registering the tool here is the only piece this surface
 	// needs beyond what `zero exec --use-spec` already does identically.
-	if mode == agent.PermissionModeSpecDraft {
-		specmode.RegisterDraftTools(registry, sess.cwd, time.Now)
-		opts.SystemPrompt = specmode.DraftSystemPrompt
+	if mode == agent.PermissionModeSpecDraft || mode == agent.PermissionModeDeepPlan {
+		if mode == agent.PermissionModeDeepPlan {
+			// Deep-plan additionally needs swarm_spawn/swarm_collect to fan out to
+			// explorer/critic/checker specialists - already registered into this
+			// session's registry unconditionally by ensureSpecialists/RegisterInto
+			// above; ToolAdvertised's deep-plan branch is what actually surfaces
+			// them for this mode (see internal/agent/loop.go). submit_spec is
+			// additionally gated on the review team having been collected at
+			// least once (see specmode.NewDeepPlanSubmitTool) - a model that
+			// decides mid-draft it "has enough" and skips the review round gets
+			// an actionable error instead of silently producing an unreviewed spec.
+			var gate specmode.ReviewGate
+			if tooling != nil {
+				gate = tooling.ReviewGate()
+			}
+			specmode.RegisterDeepPlanTools(registry, sess.cwd, time.Now, gate)
+			opts.SystemPrompt = specmode.DeepPlanSystemPrompt
+		} else {
+			specmode.RegisterDraftTools(registry, sess.cwd, time.Now)
+			opts.SystemPrompt = specmode.DraftSystemPrompt
+		}
 	}
 
 	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
@@ -446,7 +493,7 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModeSpecDraft:
+	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModeSpecDraft, agent.PermissionModeDeepPlan:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
@@ -522,15 +569,16 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
-	// auto/ask/spec-draft are offered over ACP; Unsafe is gated to the
-	// operator (see handleSetMode) so a client can't grant itself no-prompt
-	// host access.
+	// auto/ask/spec-draft/deep-plan are offered over ACP; Unsafe is gated to
+	// the operator (see handleSetMode) so a client can't grant itself
+	// no-prompt host access.
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
 			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
 			{ID: string(agent.PermissionModeSpecDraft), Name: "Plan", Description: "Draft a read-only implementation spec for review before any changes are made."},
+			{ID: string(agent.PermissionModeDeepPlan), Name: "Deep Plan", Description: "Draft a validated implementation spec via parallel explorer/critic/fact-check passes before review."},
 		},
 	}
 }
@@ -662,13 +710,16 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 // session is returned unchanged rather than orphaning its turn or resetting its
 // mode/model. history is set BEFORE publishing so no concurrent prompt can read a
 // half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord) *acpSession {
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, sessionKind sessions.SessionKind, specFilePath string, specDraftPipeline string) *acpSession {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
 		return existing
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, history: history}
+	sess := &acpSession{
+		id: id, cwd: cwd, mode: agent.PermissionModeAuto, history: history,
+		sessionKind: sessionKind, specFilePath: specFilePath, specDraftPipeline: specDraftPipeline,
+	}
 	a.sessions[id] = sess
 	return sess
 }

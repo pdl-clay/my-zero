@@ -131,6 +131,23 @@ func TestParseExecSpecOverridesRequireUseSpec(t *testing.T) {
 	}
 }
 
+func TestParseExecDeepPlanRequiresUseSpec(t *testing.T) {
+	_, _, err := parseExecArgs([]string{"--deep-plan", "plan"})
+	if err == nil || !strings.Contains(err.Error(), "--deep-plan requires --use-spec") {
+		t.Fatalf("expected --deep-plan/--use-spec validation, got %v", err)
+	}
+}
+
+func TestParseExecDeepPlanWithUseSpecParses(t *testing.T) {
+	options, _, err := parseExecArgs([]string{"--use-spec", "--deep-plan", "plan"})
+	if err != nil {
+		t.Fatalf("parseExecArgs: %v", err)
+	}
+	if !options.useSpec || !options.deepPlan {
+		t.Fatalf("expected useSpec and deepPlan both true, got %+v", options)
+	}
+}
+
 func TestRunExecUseSpecRejectsSpecialistTag(t *testing.T) {
 	exitCode, _, stderr := runExecWithEcho(t, []string{"exec", "--use-spec", "--tag", "specialist", "plan"})
 	if exitCode != exitUsage {

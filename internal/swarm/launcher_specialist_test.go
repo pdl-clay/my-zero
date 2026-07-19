@@ -68,6 +68,43 @@ func TestSpecialistLauncherRunsUnregisteredSwarmAgent(t *testing.T) {
 	}
 }
 
+// TestSpecialistManifestForMemberHonorsDeclaredTools guards a regression found
+// while validating the deep-plan checker: specialistManifestForMember used to
+// ignore spec.Tools entirely and always pass the generic
+// read/write/execute/plan swarmMemberToolGroups to the child, so a Definition
+// that declared a narrower grant (e.g. deep-plan-checker's read-only+web_fetch)
+// never actually reached the child's --enabled-tools - web_fetch calls failed
+// with "not enabled for this run" even though the Definition explicitly
+// granted it, and every "restricted" swarm agent type was in practice exactly
+// as capable as a normal teammate/subagent. It also ignored spec.NetworkUnsafe
+// entirely, so even once Tools correctly included web_fetch, the call still
+// hit a sandbox network-approval prompt (denied headlessly) instead of the
+// intended autonomy escalation - both halves are required together.
+func TestSpecialistManifestForMemberHonorsDeclaredTools(t *testing.T) {
+	restricted := specialistManifestForMember(MemberSpec{AgentType: "deep-plan-checker", Tools: []string{"read_file", "web_fetch"}, NetworkUnsafe: true})
+	got := strings.Join(restricted.Metadata.Tools, ",")
+	if !strings.Contains(got, "web_fetch") {
+		t.Fatalf("declared Tools must win over the generic group, got Metadata.Tools=%v", restricted.Metadata.Tools)
+	}
+	if strings.Contains(got, "write_file") || strings.Contains(got, "bash") {
+		t.Fatalf("declared narrow Tools must not be widened with the generic group's write/shell tools, got %v", restricted.Metadata.Tools)
+	}
+	if !restricted.Metadata.NetworkUnsafe {
+		t.Fatal("spec.NetworkUnsafe must reach Metadata.NetworkUnsafe, got false")
+	}
+
+	generic := specialistManifestForMember(MemberSpec{AgentType: "teammate"})
+	if len(generic.Metadata.Tools) == 0 {
+		t.Fatal("a member with no declared Tools must still fall back to swarmMemberToolGroups, got empty")
+	}
+	if strings.Join(generic.Metadata.Tools, ",") != strings.Join(swarmMemberToolGroups, ",") {
+		t.Fatalf("fallback must be exactly swarmMemberToolGroups, got %v", generic.Metadata.Tools)
+	}
+	if generic.Metadata.NetworkUnsafe {
+		t.Fatal("a member with NetworkUnsafe unset must not escalate, got true")
+	}
+}
+
 // A member whose child exits non-zero (e.g. exit 4 / max-turns) must be reported as
 // a FAILURE — otherwise the swarm marks it [done] and the orchestrator trusts
 // incomplete work. The failed member keeps its session id (drill-in) and the child

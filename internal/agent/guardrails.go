@@ -62,6 +62,13 @@ const (
 	// INCOMPLETE rather than nudging forever (and it is still bounded by maxTurns
 	// and the run deadline).
 	maxContinueNudges = 3
+
+	// maxSpecComplianceRounds bounds how many spec-compliance nudge rounds
+	// (Options.SpecComplianceGate) the headless completion gate will issue: one
+	// initial spawn-and-check round, plus fix-and-recheck rounds. Once spent
+	// without a COMPLIANCE: PASS verdict, the run finalizes as INCOMPLETE rather
+	// than nudging forever.
+	maxSpecComplianceRounds = 2
 )
 
 // continueNudgeMarker is a stable substring for tests.
@@ -316,6 +323,84 @@ func acceptanceVerificationNudge() string {
 		"thing the task asked you to produce, recover, fix, or optimize. " +
 		"If that check passes, reply PASS and cite the evidence. " +
 		"If it does not pass — or you cannot run such a check — say so plainly and keep working; do not claim success."
+}
+
+// specComplianceSpecialistName must match the built-in specialist registered
+// as "spec-compliance-checker" (internal/specialist/builtin.go). Kept as a
+// plain literal rather than an imported constant: internal/agent does not
+// depend on internal/specialist/internal/specmode (specmode depends on
+// agent's StopReason, so the reverse import would cycle), the same reason
+// ComplianceGate is a small local interface instead of importing swarm.
+const specComplianceSpecialistName = "spec-compliance-checker"
+
+// specComplianceNudgeMarker is a stable substring for tests.
+const specComplianceNudgeMarker = specComplianceSpecialistName
+
+// specComplianceNudge instructs the model to verify its implementation
+// against the approved spec via an INDEPENDENT specialist before finishing.
+// Self-assessment is deliberately not offered as an option: the model that
+// may have silently deviated from the spec is not a reliable judge of its own
+// deviation — that gap is exactly what this gate exists to close.
+func specComplianceNudge(specFilePath, team string) string {
+	return "Before this task can be marked complete, spawn a " + specComplianceNudgeMarker +
+		" (swarm_spawn, agent_type: \"" + specComplianceSpecialistName + "\", team: \"" + team + "\") " +
+		"and give it this spec file path to check the workspace against: " + specFilePath + ". " +
+		"Then call swarm_collect(team: \"" + team + "\") and wait for its report before replying again. " +
+		"Do not assess your own compliance with the spec yourself — an independent check is required."
+}
+
+// specComplianceMarkerPass/Fail are the exact verdict lines the
+// spec-compliance-checker specialist is instructed to end its report with
+// (internal/specialist/builtin.go's specComplianceCheckerPrompt) — matched
+// case-insensitively since a model may vary letter case despite instructions.
+const (
+	specComplianceMarkerPass = "COMPLIANCE: PASS"
+	specComplianceMarkerFail = "COMPLIANCE: FAIL"
+)
+
+// latestComplianceVerdict scans messages in reverse for the most recent TOOL
+// result that looks like a spec-compliance-checker report: a real tool_result
+// (never model-authored text - the loop only appends MessageRoleTool entries
+// from actual tool execution) whose content names the specialist AND carries
+// a compliance verdict marker. This is what lets the gate recognize a check
+// run via the generic Task/TaskOutput tools (specialist.Builtins() registers
+// spec-compliance-checker there too, not just in the swarm roster) exactly as
+// trustworthily as one run via swarm_spawn/swarm_collect.
+func latestComplianceVerdict(messages []zeroruntime.Message) (string, bool) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != zeroruntime.MessageRoleTool {
+			continue
+		}
+		if !strings.Contains(m.Content, specComplianceSpecialistName) {
+			continue
+		}
+		upper := strings.ToUpper(m.Content)
+		if strings.Contains(upper, specComplianceMarkerPass) || strings.Contains(upper, specComplianceMarkerFail) {
+			return m.Content, true
+		}
+	}
+	return "", false
+}
+
+// specCompliancePassed reports whether a collected compliance-team verdict
+// represents a pass: an explicit PASS marker with no FAIL marker also present.
+// A malformed report (both markers, or neither) is treated as not-yet-passed
+// so the run keeps nudging rather than trusting an ambiguous result.
+func specCompliancePassed(verdict string) bool {
+	upper := strings.ToUpper(verdict)
+	return strings.Contains(upper, specComplianceMarkerPass) && !strings.Contains(upper, specComplianceMarkerFail)
+}
+
+// specComplianceFixNudge reports the compliance checker's own findings back to
+// the model and requires a fresh round in a NEW team (team names are not
+// scoped per round in this swarm — reusing one would mix this round's
+// results with the last one, the same lesson deep-plan's review round hit).
+func specComplianceFixNudge(verdict, nextTeam string) string {
+	return "The " + specComplianceSpecialistName + " reported unresolved deviations from the approved spec:\n\n" +
+		strings.TrimSpace(verdict) + "\n\n" +
+		"Fix these before finishing. Then spawn another " + specComplianceSpecialistName + " into a NEW team " +
+		"(team: \"" + nextTeam + "\") and swarm_collect it again — do not reuse the previous team name."
 }
 
 // toolFailureHintMarker is a stable substring for tests.

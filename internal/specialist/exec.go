@@ -196,6 +196,41 @@ func manifestIsReadOnly(manifest Manifest) bool {
 	return true
 }
 
+// networkSafeSpecialistTools is readOnlySpecialistTools plus the read-oriented
+// network tools. A specialist whose resolved tools are ALL in this set can
+// reach the network but still cannot write files, edit, or run commands — see
+// IsNetworkSafeTools and Manifest.NetworkUnsafe.
+var networkSafeSpecialistTools = map[string]bool{
+	"read_file":          true,
+	"read_minified_file": true,
+	"list_directory":     true,
+	"grep":               true,
+	"glob":               true,
+	"update_plan":        true,
+	"web_fetch":          true,
+	"web_search":         true,
+}
+
+// IsNetworkSafeTools reports whether a resolved tool list is entirely
+// read-only-plus-network. It is re-verified against the ACTUAL resolved tool
+// list at the BuildArgs/BuildResumeArgs call sites, not trusted from
+// Manifest.NetworkUnsafe alone — that flag only requests the autonomy
+// escalation; this function is the independent gate that confirms escalating
+// is actually safe before it happens. Exported so internal/swarm's spawnTool
+// can apply the identical rule when auto-approving a swarm_spawn call (a
+// read-only definition is a subset of this set, so one check covers both).
+func IsNetworkSafeTools(resolvedTools []string) bool {
+	if len(resolvedTools) == 0 {
+		return false
+	}
+	for _, tool := range resolvedTools {
+		if !networkSafeSpecialistTools[tool] {
+			return false
+		}
+	}
+	return true
+}
+
 type ExecResult struct {
 	Result    tools.Result
 	SessionID string
@@ -259,10 +294,6 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 		return BuildArgsResult{}, err
 	}
 
-	args := []string{"exec", "--init-session-id", sessionID}
-	args = append(args, promptArgs...)
-	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
-	args = append(args, "--auto", memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy), "--output-format", "stream-json")
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -270,6 +301,21 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	if len(toolAllowlist) == 0 {
 		return BuildArgsResult{}, fmt.Errorf("specialist %q resolved no enabled tools", input.Manifest.Metadata.Name)
 	}
+	autonomy := memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy)
+	if input.Manifest.Metadata.NetworkUnsafe && IsNetworkSafeTools(toolAllowlist) {
+		// This specialist's resolved tools are read-only-plus-network (re-verified
+		// above, never just trusted from the flag) - escalating only removes the
+		// permission PROMPT for reads (already auto-allowed) and web_fetch/
+		// web_search (the intended effect); it grants no new capability class.
+		// This is what lets e.g. the deep-plan checker reach the network in a
+		// headless run with no OnPermissionRequest callback wired.
+		autonomy = "high"
+	}
+
+	args := []string{"exec", "--init-session-id", sessionID}
+	args = append(args, promptArgs...)
+	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
+	args = append(args, "--auto", autonomy, "--output-format", "stream-json")
 	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
 	if parentSessionID := strings.TrimSpace(input.ParentSessionID); parentSessionID != "" {
@@ -312,9 +358,6 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	if err != nil {
 		return BuildArgsResult{}, err
 	}
-	args := []string{"exec", "--resume", sessionID}
-	args = append(args, promptArgs...)
-	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -322,6 +365,14 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	if len(toolAllowlist) == 0 {
 		return BuildArgsResult{}, fmt.Errorf("specialist %q resolved no enabled tools", input.Manifest.Metadata.Name)
 	}
+	autonomy := specialistAutonomy(input.PermissionMode)
+	if input.Manifest.Metadata.NetworkUnsafe && IsNetworkSafeTools(toolAllowlist) {
+		autonomy = "high" // see the matching comment in BuildArgs
+	}
+
+	args := []string{"exec", "--resume", sessionID}
+	args = append(args, promptArgs...)
+	args = append(args, "--auto", autonomy, "--output-format", "stream-json")
 	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {

@@ -30,6 +30,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -80,6 +81,13 @@ type model struct {
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
+	// specReviewGate lets /deep-plan's submit_spec refuse to run until the
+	// review team has actually been collected (see options.SpecReviewGate).
+	specReviewGate specmode.ReviewGate
+	// specComplianceGate wires the spec-implementation completion gate for any
+	// spec-impl session this TUI resumes/continues (see
+	// options.SpecComplianceGate, approveSpecReview, runAgentWithOptions).
+	specComplianceGate agent.ComplianceGate
 	// lspManager is created once per session and reused across prompts so gopls (and
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
@@ -679,6 +687,10 @@ type pendingSpecReviewPrompt struct {
 	SpecFilePath   string
 	RelativePath   string
 	DraftSessionID string
+	// DeepPlan records whether this draft ran under PermissionModeDeepPlan (vs
+	// the plain mono draft), so activateSpecReview/approveSpecReview can stamp
+	// sessions.Metadata.SpecDraftPipeline accordingly.
+	DeepPlan bool
 }
 
 type tuiAgentRunOptions struct {
@@ -788,6 +800,8 @@ func newModel(ctx context.Context, options Options) model {
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
 		registry:                    registry,
+		specReviewGate:              options.SpecReviewGate,
+		specComplianceGate:          options.SpecComplianceGate,
 		sessionStore:                sessionStore,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
@@ -4265,6 +4279,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, retitleCmd
 	case commandSpec:
 		return m.handleSpecCommand(command.text)
+	case commandDeepPlan:
+		return m.handleDeepPlanCommand(command.text)
 	case commandInit:
 		return m.handleInitCommand()
 	case commandCompact:
@@ -4734,6 +4750,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			options.SystemPrompt = runOptions.systemPrompt
 		}
 		options.SessionID = m.activeSession.SessionID
+		// A spec-implementation session (created by approveSpecReview) gets the
+		// spec-compliance completion gate wired, same as `zero exec --resume`
+		// (internal/cli/exec.go) and ACP's session/load path. Currently inert
+		// here too - the gate only fires when RequireCompletionSignal is also
+		// on, which the TUI leaves off (interactive, human-supervised) - but
+		// wiring it now means no further plumbing is needed if that changes.
+		if m.activeSession.SessionKind == sessions.SessionKindSpecImpl && m.activeSession.SpecDraftPipeline == sessions.SpecDraftPipelineDeepPlan {
+			options.SpecFilePath = m.activeSession.SpecFilePath
+			options.SpecComplianceGate = m.specComplianceGate
+		}
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
@@ -5016,7 +5042,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onToolResult := options.OnToolResult
 		options.OnToolResult = func(result agent.ToolResult) {
 			if runOptions.specDraft {
-				if info, ok := tuiSpecReviewFromToolResult(result, m.activeSession.SessionID); ok {
+				if info, ok := tuiSpecReviewFromToolResult(result, m.activeSession.SessionID, options.PermissionMode == agent.PermissionModeDeepPlan); ok {
 					specReview = &info
 				}
 			}

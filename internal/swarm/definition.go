@@ -32,6 +32,20 @@ type Definition struct {
 	WhenToUse      string
 	Model          string // "inherit" => use the orchestrator's model
 	PermissionMode string
+	// Tools restricts the member to this resolved tool-name list (e.g.
+	// ["read_file", "glob", "grep"]). Empty => the launcher's default
+	// swarmMemberToolGroups (read/write/execute/plan), matching every built-in
+	// definition today. A definition that sets this to an all-read-only (or
+	// read-only + web_fetch/web_search) set is exactly what lets spawnTool
+	// auto-approve it without a permission prompt — see PermissionForArgs.
+	Tools []string
+	// NetworkUnsafe escalates this member's own subprocess to --auto high (a
+	// real permission widening, scoped to that one child) so it can actually
+	// reach network tools like web_fetch even in a headless run with no
+	// OnPermissionRequest callback. Only ever set true on a definition whose
+	// Tools are verified read-only-plus-network (see manifestIsNetworkSafe in
+	// internal/specialist) — never set this from user/project input.
+	NetworkUnsafe bool
 	// SystemPrompt returns the member's system prompt for the given task context.
 	// It is a func so a definition can fold the task briefing in.
 	SystemPrompt func(ctx PromptContext) string

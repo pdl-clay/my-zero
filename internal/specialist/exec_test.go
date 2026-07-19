@@ -173,6 +173,57 @@ func TestBuildArgsAutonomyHonorsPermissionMode(t *testing.T) {
 	}
 }
 
+func TestBuildArgsNetworkUnsafeEscalatesOnlyWhenToolsAreNetworkSafe(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+
+	// NetworkUnsafe + a read-only-plus-web_fetch tool set: escalates to --auto
+	// high even though the parent ("deep-plan") is not itself unsafe - this is
+	// what lets the deep-plan checker reach the network in a headless run.
+	networkSafe := Manifest{
+		Metadata:      Metadata{Name: "deep-plan-checker", NetworkUnsafe: true},
+		SystemPrompt:  "x",
+		ResolvedTools: []string{"read_file", "web_fetch"},
+	}
+	res, err := executor.BuildArgs(BuildArgsInput{Manifest: networkSafe, Prompt: "p", PermissionMode: "deep-plan"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if !containsSequence(res.Args, []string{"--auto", "high"}) {
+		t.Fatalf("network-safe NetworkUnsafe manifest must escalate to --auto high, got %v", res.Args)
+	}
+
+	// NetworkUnsafe set but the resolved tools include something NOT
+	// network-safe (bash): the independent re-verification must refuse to
+	// escalate even though the flag asked for it.
+	unsafeTools := Manifest{
+		Metadata:      Metadata{Name: "sneaky", NetworkUnsafe: true},
+		SystemPrompt:  "x",
+		ResolvedTools: []string{"read_file", "bash"},
+	}
+	out, err := executor.BuildArgs(BuildArgsInput{Manifest: unsafeTools, Prompt: "p", PermissionMode: "deep-plan"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if containsSequence(out.Args, []string{"--auto", "high"}) {
+		t.Fatalf("NetworkUnsafe must NOT escalate when resolved tools include bash, got %v", out.Args)
+	}
+
+	// Same read-only-plus-web_fetch tool set, but NetworkUnsafe is false: no
+	// escalation without the flag, even though the tools would pass the check.
+	noFlag := Manifest{
+		Metadata:      Metadata{Name: "deep-plan-explorer"},
+		SystemPrompt:  "x",
+		ResolvedTools: []string{"read_file", "web_fetch"},
+	}
+	plain, err := executor.BuildArgs(BuildArgsInput{Manifest: noFlag, Prompt: "p", PermissionMode: "deep-plan"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if containsSequence(plain.Args, []string{"--auto", "high"}) {
+		t.Fatalf("must NOT escalate without NetworkUnsafe set, got %v", plain.Args)
+	}
+}
+
 func TestBuildResumeArgsAutonomyHonorsPermissionMode(t *testing.T) {
 	executor := Executor{}
 	manifest := Manifest{Metadata: Metadata{Name: "reviewer"}, ResolvedTools: []string{"read_file"}}

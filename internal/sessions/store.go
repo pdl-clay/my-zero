@@ -56,6 +56,11 @@ const (
 	SessionKindSpecImpl  SessionKind = "spec-impl"
 )
 
+// SpecDraftPipelineDeepPlan is the Metadata.SpecDraftPipeline value recorded
+// for a spec drafted via the deep-plan explorer/critic/checker pipeline. An
+// empty string means the plain mono draft (no pipeline marker).
+const SpecDraftPipelineDeepPlan = "deep-plan"
+
 type SpecStatus string
 
 const (
@@ -90,6 +95,7 @@ type Metadata struct {
 	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
 	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
 	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
+	SpecDraftPipeline   string      `json:"specDraftPipeline,omitempty"`
 	CreatedAt           string      `json:"createdAt"`
 	UpdatedAt           string      `json:"updatedAt"`
 	EventCount          int         `json:"eventCount"`
@@ -122,6 +128,14 @@ type CreateInput struct {
 	SpecRejectReason    string
 	SpecSourceSessionID string
 	SpecImplSessionID   string
+	// SpecDraftPipeline records which spec-draft system prompt produced this
+	// spec: "deep-plan" for the explorer/critic/checker pipeline, "" for the
+	// plain mono draft. Set once when the draft completes (RecordSpec) and
+	// copied onto the implementation session (EnsureSpecImplementation) so a
+	// resumed --resume/session-load caller can gate implementation-phase
+	// behavior (e.g. agent.Options.SpecComplianceGate) on it without needing
+	// to look up the source draft session separately.
+	SpecDraftPipeline string
 }
 
 type ForkInput struct {
@@ -170,6 +184,11 @@ type RecordSpecInput struct {
 	SpecRejectReason    string
 	SpecSourceSessionID string
 	SpecImplSessionID   string
+	// SpecDraftPipeline: see the field doc on CreateInput. Only meaningful the
+	// first time a draft is recorded (SpecStatusDraft); left empty on later
+	// approve/reject calls since the pipeline that produced the draft cannot
+	// change after the fact.
+	SpecDraftPipeline string
 }
 
 type Event struct {
@@ -276,6 +295,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		SpecRejectReason:    strings.TrimSpace(input.SpecRejectReason),
 		SpecSourceSessionID: strings.TrimSpace(input.SpecSourceSessionID),
 		SpecImplSessionID:   strings.TrimSpace(input.SpecImplSessionID),
+		SpecDraftPipeline:   strings.TrimSpace(input.SpecDraftPipeline),
 		CreatedAt:           timestamp,
 		UpdatedAt:           timestamp,
 		EventCount:          0,
@@ -1091,5 +1111,8 @@ func applySpecRecord(session *Metadata, input RecordSpecInput, status SpecStatus
 	}
 	if implID := strings.TrimSpace(input.SpecImplSessionID); implID != "" {
 		session.SpecImplSessionID = implID
+	}
+	if pipeline := strings.TrimSpace(input.SpecDraftPipeline); pipeline != "" {
+		session.SpecDraftPipeline = pipeline
 	}
 }

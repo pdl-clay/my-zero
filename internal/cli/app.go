@@ -34,6 +34,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/swarm"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
@@ -402,6 +403,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSkills(args[1:], stdout, stderr, deps)
 	case "tools", "tool":
 		return runTools(args[1:], stdout, stderr, deps)
+	case "task":
+		return runTask(args[1:], stdout, stderr, deps)
 	case "hooks":
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
@@ -816,6 +819,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},
 		Registry:           registry,
+		SpecReviewGate:     specialistRuntime.ReviewGate(),
+		SpecComplianceGate: specialistRuntime.ComplianceGate(),
 		SessionStore:       deps.newSessionStore(),
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
@@ -1055,6 +1060,28 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 // Specialists implements acp.SpecialistTooling.
 func (r *agentToolRuntime) Specialists() []agent.SpecialistInfo { return r.specialistInfos() }
 
+// ReviewGate implements acp.SpecialistTooling: exposes this runtime's swarm as
+// a specmode.ReviewGate for the deep-plan submit_spec gate (see
+// specmode.NewDeepPlanSubmitTool). Nil-safe - a nil runtime or swarm yields a
+// nil gate, which disables the check rather than deadlocking the run.
+func (r *agentToolRuntime) ReviewGate() specmode.ReviewGate {
+	if r == nil || r.swarm == nil {
+		return nil
+	}
+	return r.swarm
+}
+
+// ComplianceGate exposes this runtime's swarm as an agent.ComplianceGate for
+// the spec-implementation completion gate (see agent.Options.SpecComplianceGate,
+// internal/agent/loop.go). Nil-safe - a nil runtime or swarm yields a nil
+// gate, which disables the check rather than deadlocking the run.
+func (r *agentToolRuntime) ComplianceGate() agent.ComplianceGate {
+	if r == nil || r.swarm == nil {
+		return nil
+	}
+	return r.swarm
+}
+
 // RegisterInto implements acp.SpecialistTooling: re-registers this
 // already-built runtime's tool objects into a fresh registry. Cheap - it
 // does not construct a new background manager or swarm, since
@@ -1117,6 +1144,7 @@ func registerSpecialistToolsWithBaseDir(registry *tools.Registry, workspaceRoot 
 		BaseDir:     baseDir,
 		Launcher:    swarm.NewSpecialistLauncher(executor),
 		MaxTeamSize: maxTeamSize,
+		Definitions: builtinSwarmDefinitions(paths),
 	})
 	if err != nil {
 		runtime.Close()
@@ -1153,7 +1181,59 @@ func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
 	return summaries
 }
 
+// specCompliancePseudoAgentType is the one non-"deep-plan-"-prefixed name
+// builtinSwarmDefinitions also registers: the spec-compliance-checker used by
+// the SpecComplianceGate (internal/agent/loop.go) after ANY spec-implementation
+// session, not just deep-plan-drafted ones, so it does not fit the deep-plan-*
+// naming convention.
+const specCompliancePseudoAgentType = "spec-compliance-checker"
+
+// builtinSwarmDefinitions maps the built-in deep-plan-* specialist manifests
+// plus spec-compliance-checker (internal/specialist/builtin.go) into
+// swarm.Definition roster entries so an orchestrator can swarm_spawn them by
+// name with their own tool grant (Tools/NetworkUnsafe) instead of the generic
+// write/execute-capable swarmMemberToolGroups every other swarm member gets.
+// Registered unconditionally (not gated on deep-plan mode): harmless in a
+// session that never references these agent types, and keeps this a single
+// shared code path, since both `zero exec` (CLI) and buildACPSpecialistTooling
+// (ACP) route through registerSpecialistToolsWithBaseDir. A load error yields
+// no definitions (a run that needs one of these would then fail its own
+// swarm_spawn call with ErrUnknownAgentType) rather than failing the run.
+func builtinSwarmDefinitions(paths specialist.Paths) []swarm.Definition {
+	result, err := specialist.Load(specialist.LoadOptions{Paths: paths})
+	if err != nil {
+		return nil
+	}
+	var defs []swarm.Definition
+	for _, manifest := range result.Specialists {
+		name := strings.TrimSpace(manifest.Metadata.Name)
+		if !strings.HasPrefix(name, "deep-plan-") && name != specCompliancePseudoAgentType {
+			continue
+		}
+		prompt := manifest.SystemPrompt
+		defs = append(defs, swarm.Definition{
+			AgentType:     name,
+			WhenToUse:     strings.TrimSpace(manifest.Metadata.Description),
+			Tools:         append([]string(nil), manifest.ResolvedTools...),
+			NetworkUnsafe: manifest.Metadata.NetworkUnsafe,
+			// The task briefing is supplied separately by WrapSystemPrompt's own
+			// "## Assigned Task" section (built from the swarm_spawn "task" arg),
+			// so this closure returns the static role prompt as-is rather than
+			// folding ctx.Task in itself.
+			SystemPrompt: func(swarm.PromptContext) string { return prompt },
+		})
+	}
+	return defs
+}
+
 func shouldRegisterExecSpecialistTools(options execOptions) bool {
+	if options.deepPlan {
+		// Deep-plan always needs the swarm/specialist runtime (swarm_spawn/
+		// swarm_collect to fan out to explorer/critic/checker members),
+		// regardless of --auto - unlike plain --use-spec below, which never
+		// spawns anything and stays a single-shot read-only draft.
+		return true
+	}
 	if options.useSpec {
 		return false
 	}
@@ -1397,6 +1477,7 @@ Flags:
       --mode <name>                  Apply a preset (smart, deep, fast, large, precise); explicit flags override it
   -m, --model <model>                Select the model for provider setup
       --use-spec                     Draft a spec first and stop for review
+      --deep-plan                    With --use-spec, draft via parallel explorer/critic/fact-check passes before consolidating
       --spec-model <model>           Override the draft model when --use-spec is set
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set

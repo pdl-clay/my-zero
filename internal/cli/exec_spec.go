@@ -56,6 +56,16 @@ type execSpecDraftInfo struct {
 	DraftSessionID string
 }
 
+// draftSystemPromptFor picks the drafting system prompt for the resolved
+// permission mode: the multi-agent explore/critique/consolidate pipeline
+// prompt for deep-plan, the single-shot prompt for plain spec-draft.
+func draftSystemPromptFor(mode agent.PermissionMode) string {
+	if mode == agent.PermissionModeDeepPlan {
+		return specmode.DeepPlanSystemPrompt
+	}
+	return specmode.DraftSystemPrompt
+}
+
 func runExecSpecDraft(run execSpecDraftRun) int {
 	store := run.deps.newSessionStore()
 	draftSession, err := store.Create(sessions.CreateInput{
@@ -120,10 +130,10 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		Model:           run.resolved.Provider.Model,
 		ReasoningEffort: run.reasoningEffort,
 		Cwd:             run.workspaceRoot,
-		SystemPrompt:    specmode.DraftSystemPrompt,
+		SystemPrompt:    draftSystemPromptFor(run.specPermissionMode),
 		Images:          run.images,
 		Registry:        run.registry,
-		PermissionMode:  agent.PermissionModeSpecDraft,
+		PermissionMode:  run.specPermissionMode,
 		Autonomy:        "low",
 		Sandbox:         run.sandboxEngine,
 		FileTracker:     tools.NewFileTracker(),
@@ -206,6 +216,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		SpecStatus:         sessions.SpecStatusDraft,
 		SpecDraftModelID:   run.resolved.Provider.Model,
 		SpecDraftReasoning: run.reasoningEffort,
+		SpecDraftPipeline:  deepPlanPipelineValue(run.options.deepPlan),
 	}); err != nil {
 		return writeAppError(run.stderr, err.Error(), exitCrash)
 	}
@@ -217,6 +228,15 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// deepPlanPipelineValue returns the sessions.Metadata.SpecDraftPipeline value
+// for a draft produced with (or without) --deep-plan.
+func deepPlanPipelineValue(deepPlan bool) string {
+	if deepPlan {
+		return sessions.SpecDraftPipelineDeepPlan
+	}
+	return ""
 }
 
 func execSpecDraftInfoFromToolResult(result agent.ToolResult) (execSpecDraftInfo, bool) {
