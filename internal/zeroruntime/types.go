@@ -133,11 +133,14 @@ type TokenUsage struct {
 // a provider reports them separately; ReasoningTokens is a subset of OutputTokens,
 // not an additive count.
 //
-// GenerationDuration is measured by the agent loop (not by providers) for the
-// specific generation call that produced this usage: from the first streamed
-// token or reasoning delta until the end of that call's stream. It is zero when
-// not measured (for example, internal/overhead generation calls such as
-// compaction retries are intentionally uninstrumented).
+// GenerationDuration is measured by CollectStreamWithOptions (not by
+// providers, none of which report incremental timing) for the specific
+// generation call that produced this usage: from the first streamed text or
+// reasoning delta until that call's stream ends. It is local to a single
+// CollectStreamWithOptions invocation, so it can never leak time from a prior
+// generation call or from tool execution between calls. It is zero when a
+// call's stream never produced a text/reasoning delta before its usage event
+// (e.g. a tool-call-only turn).
 type Usage struct {
 	InputTokens        int
 	OutputTokens       int

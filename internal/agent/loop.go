@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -306,16 +305,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// before the append), so the retry re-sends clean context with no
 		// conversation-state duplication.
 		forwardedVisibleText := false
-		var genFirstTokenAt time.Time
-		forwardingOpts := zeroruntime.CollectOptions{}
-		if options.OnUsage != nil {
-			forwardingOpts.OnUsage = func(u zeroruntime.Usage) {
-				if !genFirstTokenAt.IsZero() {
-					u.GenerationDuration = time.Since(genFirstTokenAt)
-				}
-				options.OnUsage(u)
-			}
-		}
+		forwardingOpts := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
 		// Install text/reasoning forwarding handlers whenever EITHER a user
 		// callback OR a trace recorder is set. A headless traced run (e.g. `zero
 		// exec --trace`) sets Trace but no OnText/OnReasoning; without these
@@ -329,9 +319,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		onText := options.OnText
 		if onText != nil || rec != nil {
 			forwardingOpts.OnText = func(s string) {
-				if genFirstTokenAt.IsZero() {
-					genFirstTokenAt = time.Now()
-				}
 				if rec != nil {
 					rec.StampFirstVisibleEvent()
 					rec.StampFirstToken()
@@ -345,9 +332,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		onReasoning := options.OnReasoning
 		if onReasoning != nil || rec != nil {
 			forwardingOpts.OnReasoning = func(s string) {
-				if genFirstTokenAt.IsZero() {
-					genFirstTokenAt = time.Now()
-				}
 				if rec != nil {
 					rec.StampFirstToken()
 				}
@@ -393,12 +377,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					return collected, retryStreamErr
 				}
 				genSpan := options.Trace.Span(trace.SpanGeneration)
-				// Only the (duration-aware) OnUsage wrapper is reused here — NOT
-				// forwardingOpts.OnText/OnReasoning. The original stream's partial
-				// text was already forwarded to the user once; re-streaming the
-				// retry through the same OnText callback would double-emit it.
+				// Only OnUsage is reused here — NOT forwardingOpts.OnText/OnReasoning.
+				// The original stream's partial text was already forwarded to the
+				// user once; re-streaming the retry through the same OnText callback
+				// would double-emit it.
 				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, zeroruntime.CollectOptions{
-					OnUsage: forwardingOpts.OnUsage,
+					OnUsage: options.OnUsage,
 				})
 				genSpan.End()
 			}

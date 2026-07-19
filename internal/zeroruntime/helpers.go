@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // CollectedStream is the non-streaming summary of provider events.
@@ -94,10 +95,21 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 	collected := CollectedStream{}
 	collector := newToolCallCollector()
 	usageSeen := false
+	// firstTokenAt anchors this call's GenerationDuration measurement. It is a
+	// local variable scoped to THIS single CollectStreamWithOptions invocation —
+	// since the agent loop calls this function fresh for every generation call
+	// (including retries), there is no way for one call's timing to leak into
+	// another's; no cross-call bookkeeping is needed.
+	var firstTokenAt time.Time
 	finish := func() CollectedStream {
 		collector.flush(&collected)
-		if usageSeen && options.OnUsage != nil {
-			options.OnUsage(collected.Usage)
+		if usageSeen {
+			if !firstTokenAt.IsZero() {
+				collected.Usage.GenerationDuration = time.Since(firstTokenAt)
+			}
+			if options.OnUsage != nil {
+				options.OnUsage(collected.Usage)
+			}
 		}
 		return collected
 	}
@@ -134,12 +146,18 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 				if options.OnText != nil {
 					options.OnText(event.Content)
 				}
+				if firstTokenAt.IsZero() && event.Content != "" {
+					firstTokenAt = time.Now()
+				}
 			case StreamEventReasoning:
 				if strings.TrimSpace(event.Content) != "" {
 					collected.HasReasoning = true
 				}
 				if options.OnReasoning != nil {
 					options.OnReasoning(event.Content)
+				}
+				if firstTokenAt.IsZero() && strings.TrimSpace(event.Content) != "" {
+					firstTokenAt = time.Now()
 				}
 			case StreamEventToolCallStart:
 				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)

@@ -503,6 +503,10 @@ func TestTokensPerSecondUsesEffectiveOutputTokens(t *testing.T) {
 	}
 }
 
+// TestTokensPerSecondPropagatedFromUsageEvent confirms CollectStream itself
+// (not just the agent loop) measures GenerationDuration whenever a stream
+// carries a text/reasoning delta before ending — it is a property of
+// CollectStreamWithOptions, not something a caller opts into.
 func TestTokensPerSecondPropagatedFromUsageEvent(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
@@ -512,11 +516,34 @@ func TestTokensPerSecondPropagatedFromUsageEvent(t *testing.T) {
 		events <- StreamEvent{Type: StreamEventDone}
 	}()
 	collected := CollectStream(context.Background(), events)
-	got := collected.Usage.TokensPerSecond()
-	if got != 0 {
-		t.Fatalf("TokensPerSecond() = %v, want 0 (no generation duration measured)", got)
+	if collected.Usage.GenerationDuration <= 0 {
+		t.Fatalf("GenerationDuration = %v, want > 0 (a text delta streamed before the usage event)", collected.Usage.GenerationDuration)
+	}
+	if got := collected.Usage.TokensPerSecond(); got <= 0 {
+		t.Fatalf("TokensPerSecond() = %v, want > 0", got)
 	}
 	if collected.Usage.OutputTokens != 8 {
 		t.Fatalf("OutputTokens = %d, want 8", collected.Usage.OutputTokens)
+	}
+}
+
+// TestTokensPerSecondZeroWhenNoTextStreamed confirms a stream that never
+// carries a text/reasoning delta before its usage event (e.g. a tool-call-only
+// turn) leaves GenerationDuration unmeasured.
+func TestTokensPerSecondZeroWhenNoTextStreamed(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"}
+		events <- StreamEvent{Type: StreamEventToolCallEnd, ToolCallID: "call-1"}
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 5, OutputTokens: 8}}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+	collected := CollectStream(context.Background(), events)
+	if collected.Usage.GenerationDuration != 0 {
+		t.Fatalf("GenerationDuration = %v, want 0 (no text/reasoning delta streamed)", collected.Usage.GenerationDuration)
+	}
+	if got := collected.Usage.TokensPerSecond(); got != 0 {
+		t.Fatalf("TokensPerSecond() = %v, want 0", got)
 	}
 }

@@ -3893,7 +3893,12 @@ func TestRunGenerationDurationNotInflatedAcrossToolCallTurns(t *testing.T) {
 // TestRunNilTraceOnUsageFiresWithoutGenerationDuration verifies that when Trace is
 // nil the user's OnUsage still fires but GenerationDuration is left at zero (it
 // is measured only when a trace is active).
-func TestRunNilTraceOnUsageFiresWithoutGenerationDuration(t *testing.T) {
+// TestRunNilTraceStillMeasuresGenerationDuration confirms GenerationDuration
+// is measured by zeroruntime.CollectStreamWithOptions itself, from the raw
+// stream events — NOT gated on whether the caller wired a Trace recorder or an
+// OnText/OnReasoning callback. A run with none of those set still gets a
+// correctly measured duration whenever the stream actually produced text.
+func TestRunNilTraceStillMeasuresGenerationDuration(t *testing.T) {
 	var capturedUsage zeroruntime.Usage
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
 		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 7, OutputTokens: 3}},
@@ -3913,7 +3918,10 @@ func TestRunNilTraceOnUsageFiresWithoutGenerationDuration(t *testing.T) {
 	if capturedUsage.InputTokens != 7 {
 		t.Fatalf("OnUsage.InputTokens = %d, want 7", capturedUsage.InputTokens)
 	}
-	if capturedUsage.GenerationDuration != 0 {
-		t.Fatalf("OnUsage.GenerationDuration = %v, want 0 (no trace active)", capturedUsage.GenerationDuration)
+	if capturedUsage.GenerationDuration <= 0 {
+		t.Fatalf("OnUsage.GenerationDuration = %v, want > 0 (measured independently of Trace/OnText)", capturedUsage.GenerationDuration)
+	}
+	if capturedUsage.TokensPerSecond() <= 0 {
+		t.Fatalf("OnUsage.TokensPerSecond() = %v, want > 0", capturedUsage.TokensPerSecond())
 	}
 }
