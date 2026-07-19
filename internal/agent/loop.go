@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -153,7 +154,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	options.runPermissions = runPermissions
 	defer runPermissions.cleanup()
 
-	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
+	// sessionStart fires before the messages are seeded (rather than at its
+	// historical call site further down) so a hook that returns handoff
+	// context — via the same stdout contract Claude Code's SessionStart hooks
+	// use — can be woven into the FIRST user turn. The raw `prompt` parameter
+	// is left untouched: dispatchUserPromptSubmit below, and anything else
+	// that reads `prompt`, must still see exactly what the user typed, not a
+	// prompt-plus-injected-context blend.
+	sessionStartContext := dispatchSessionStart(ctx, options)
+	seedPrompt := prompt
+	if sessionStartContext != "" {
+		seedPrompt = sessionStartContext + "\n\n---\n\n" + prompt
+	}
+	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), seedPrompt, options.Images)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
@@ -191,7 +204,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	toolDefCache := map[string]zeroruntime.ToolDefinition{}
 
 	result = Result{Messages: copyMessages(messages)}
-	dispatchSessionStart(ctx, options)
+	if strings.TrimSpace(prompt) != "" {
+		dispatchUserPromptSubmit(ctx, options, prompt)
+	}
 	defer func() {
 		dispatchSessionEnd(ctx, options, result, err)
 	}()
@@ -291,7 +306,16 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// before the append), so the retry re-sends clean context with no
 		// conversation-state duplication.
 		forwardedVisibleText := false
-		forwardingOpts := zeroruntime.CollectOptions{OnUsage: options.OnUsage}
+		var genFirstTokenAt time.Time
+		forwardingOpts := zeroruntime.CollectOptions{}
+		if options.OnUsage != nil {
+			forwardingOpts.OnUsage = func(u zeroruntime.Usage) {
+				if !genFirstTokenAt.IsZero() {
+					u.GenerationDuration = time.Since(genFirstTokenAt)
+				}
+				options.OnUsage(u)
+			}
+		}
 		// Install text/reasoning forwarding handlers whenever EITHER a user
 		// callback OR a trace recorder is set. A headless traced run (e.g. `zero
 		// exec --trace`) sets Trace but no OnText/OnReasoning; without these
@@ -305,6 +329,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		onText := options.OnText
 		if onText != nil || rec != nil {
 			forwardingOpts.OnText = func(s string) {
+				if genFirstTokenAt.IsZero() {
+					genFirstTokenAt = time.Now()
+				}
 				if rec != nil {
 					rec.StampFirstVisibleEvent()
 					rec.StampFirstToken()
@@ -318,6 +345,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		onReasoning := options.OnReasoning
 		if onReasoning != nil || rec != nil {
 			forwardingOpts.OnReasoning = func(s string) {
+				if genFirstTokenAt.IsZero() {
+					genFirstTokenAt = time.Now()
+				}
 				if rec != nil {
 					rec.StampFirstToken()
 				}
@@ -363,8 +393,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					return collected, retryStreamErr
 				}
 				genSpan := options.Trace.Span(trace.SpanGeneration)
+				// Only the (duration-aware) OnUsage wrapper is reused here — NOT
+				// forwardingOpts.OnText/OnReasoning. The original stream's partial
+				// text was already forwarded to the user once; re-streaming the
+				// retry through the same OnText callback would double-emit it.
 				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, zeroruntime.CollectOptions{
-					OnUsage: options.OnUsage,
+					OnUsage: forwardingOpts.OnUsage,
 				})
 				genSpan.End()
 			}
@@ -1711,12 +1745,14 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 
 // dispatchSessionStart runs configured sessionStart hooks once before the first
 // model turn. Lifecycle hooks are advisory: dispatcher failures are audited but
-// never block the run.
-func dispatchSessionStart(ctx context.Context, options Options) {
+// never block the run. The return value is any handoff/context text a hook
+// asked to have injected into the first turn (see extractSessionStartContext);
+// empty when no hook produced one.
+func dispatchSessionStart(ctx context.Context, options Options) string {
 	if options.Hooks == nil {
-		return
+		return ""
 	}
-	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
 		Event: hooks.EventSessionStart,
 		Payload: map[string]any{
 			"event":        string(hooks.EventSessionStart),
@@ -1727,6 +1763,65 @@ func dispatchSessionStart(ctx context.Context, options Options) {
 			"depth":        options.Depth,
 			"tag":          options.Tag,
 			"sessionTitle": options.SessionTitle,
+		},
+	})
+	return extractSessionStartContext(outcome.Messages)
+}
+
+// sessionStartHookOutput is the JSON a sessionStart hook may print to stdout to
+// have text injected into the run's first turn, matching Claude Code's own
+// SessionStart hook contract (hookSpecificOutput.additionalContext) — the same
+// schema ai-memory's Claude Code integration already emits to deliver a
+// cross-agent handoff. A hook that prints plain "{}" (no pending handoff, or a
+// hook that doesn't speak this schema at all) contributes nothing.
+type sessionStartHookOutput struct {
+	HookSpecificOutput struct {
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
+
+// extractSessionStartContext scans every sessionStart hook's stdout/stderr
+// message for the additionalContext schema above and joins whatever it finds.
+// Output that isn't valid JSON, or that parses but carries no
+// additionalContext (including the common "{}" no-op), is silently skipped —
+// sessionStart hooks are advisory, so a malformed or silent hook must never
+// fail the run.
+func extractSessionStartContext(messages []string) string {
+	var parts []string
+	for _, message := range messages {
+		trimmed := strings.TrimSpace(message)
+		if trimmed == "" || trimmed == "{}" {
+			continue
+		}
+		var output sessionStartHookOutput
+		if err := json.Unmarshal([]byte(trimmed), &output); err != nil {
+			continue
+		}
+		if context := strings.TrimSpace(output.HookSpecificOutput.AdditionalContext); context != "" {
+			parts = append(parts, context)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// dispatchUserPromptSubmit runs configured userPromptSubmit hooks once per Run,
+// carrying the real prompt text a memory/observability integration needs to
+// capture what the user actually asked for. Lifecycle hooks are advisory.
+func dispatchUserPromptSubmit(ctx context.Context, options Options, prompt string) {
+	if options.Hooks == nil {
+		return
+	}
+	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event: hooks.EventUserPromptSubmit,
+		Payload: map[string]any{
+			"event":     string(hooks.EventUserPromptSubmit),
+			"prompt":    prompt,
+			"sessionId": options.SessionID,
+			"cwd":       options.Cwd,
+			"provider":  options.ProviderName,
+			"model":     options.Model,
+			"depth":     options.Depth,
+			"tag":       options.Tag,
 		},
 	})
 }

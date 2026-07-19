@@ -331,7 +331,10 @@ type model struct {
 	// It is NOT reset at segment boundaries (where streamingText/Reasoning clear),
 	// only at turn start (beginRun), so the count climbs across a multi-tool turn
 	// instead of snapping back to zero after each tool call.
-	turnStreamedRunes int
+	turnStreamedRunes   int
+	tokPerSecOutSum     int           // measured output tokens across generations this run
+	tokPerSecDur        time.Duration // summed generation durations this run
+	lastTokensPerSecond float64       // settled tok/s shown in the footer, survives runs
 	// Streaming-text fade state. lineAges is keyed to LOGICAL lines of
 	// streamingText (one entry per \n in the accumulated text), and
 	// lastStreamActivity is the time of the most recent delta (used for
@@ -2362,6 +2365,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentUsageMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
+		}
+		if msg.usage.GenerationDuration > 0 {
+			m.tokPerSecOutSum += msg.usage.EffectiveOutputTokens()
+			m.tokPerSecDur += msg.usage.GenerationDuration
+			if m.tokPerSecDur > 0 {
+				m.lastTokensPerSecond = float64(m.tokPerSecOutSum) / m.tokPerSecDur.Seconds()
+			}
 		}
 		var usageRows []transcriptRow
 		m, usageRows = m.recordUsageEvent(msg.modelID, msg.usage)
@@ -4567,6 +4577,9 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
+	m.tokPerSecOutSum = 0
+	m.tokPerSecDur = 0
+	// lastTokensPerSecond intentionally preserved across runs so the footer keeps the last settled value.
 	m.spinnerTicking = true
 	return m
 }

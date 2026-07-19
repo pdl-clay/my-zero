@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mockProvider struct {
@@ -446,5 +447,76 @@ func TestProviderContractCanBeImplementedByMock(t *testing.T) {
 	collected := CollectStream(context.Background(), stream)
 	if collected.Text != "ok" {
 		t.Fatalf("text = %q, want ok", collected.Text)
+	}
+}
+
+func TestTokensPerSecondReturnsZeroForMissingDuration(t *testing.T) {
+	var usage Usage
+	got := usage.TokensPerSecond()
+	if got != 0 {
+		t.Fatalf("TokensPerSecond() = %v, want 0", got)
+	}
+}
+
+func TestTokensPerSecondReturnsZeroForNegativeDuration(t *testing.T) {
+	got := Usage{GenerationDuration: -time.Second}.TokensPerSecond()
+	if got != 0 {
+		t.Fatalf("TokensPerSecond() = %v, want 0", got)
+	}
+}
+
+func TestTokensPerSecondReturnsZeroWhenNoOutputTokens(t *testing.T) {
+	got := Usage{GenerationDuration: time.Second, PromptTokens: 100}.TokensPerSecond()
+	if got != 0 {
+		t.Fatalf("TokensPerSecond() = %v, want 0", got)
+	}
+}
+
+func TestTokensPerSecondUsesEffectiveOutputTokens(t *testing.T) {
+	duration := 250 * time.Millisecond
+	cases := map[string]struct {
+		usage      Usage
+		wantTokens int
+	}{
+		"OutputTokens alias": {
+			usage:      Usage{GenerationDuration: duration, OutputTokens: 100},
+			wantTokens: 100,
+		},
+		"CompletionTokens alias": {
+			usage:      Usage{GenerationDuration: duration, CompletionTokens: 100},
+			wantTokens: 100,
+		},
+		"ReasoningTokens reduce visible output": {
+			usage:      Usage{GenerationDuration: duration, OutputTokens: 100, ReasoningTokens: 20},
+			wantTokens: 100,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := tc.usage.TokensPerSecond()
+			want := float64(tc.wantTokens) / duration.Seconds()
+			if got != want {
+				t.Fatalf("TokensPerSecond() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestTokensPerSecondPropagatedFromUsageEvent(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{InputTokens: 5, OutputTokens: 8}}
+		events <- StreamEvent{Type: StreamEventText, Content: "ok"}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+	collected := CollectStream(context.Background(), events)
+	got := collected.Usage.TokensPerSecond()
+	if got != 0 {
+		t.Fatalf("TokensPerSecond() = %v, want 0 (no generation duration measured)", got)
+	}
+	if collected.Usage.OutputTokens != 8 {
+		t.Fatalf("OutputTokens = %d, want 8", collected.Usage.OutputTokens)
 	}
 }

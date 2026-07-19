@@ -296,7 +296,7 @@ func parseHooksAddArgs(args []string) (hookAddOptions, bool, error) {
 		return options, false, execUsageError{"zero hooks add requires --event"}
 	}
 	if !hooks.IsValidEvent(options.def.Event) {
-		return options, false, execUsageError{fmt.Sprintf("invalid --event %q; expected one of: beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, specialistStop", options.def.Event)}
+		return options, false, execUsageError{fmt.Sprintf("invalid --event %q; expected one of: beforeTool, afterTool, sessionStart, userPromptSubmit, sessionEnd, specialistStart, specialistStop", options.def.Event)}
 	}
 	if strings.TrimSpace(options.def.Command) == "" {
 		return options, false, execUsageError{"zero hooks add requires --command"}
@@ -312,7 +312,7 @@ func writeHooksAddHelp(w io.Writer) error {
   zero hooks add <id> --event <event> --command <cmd> [flags]
 
 Events:
-  beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, specialistStop
+  beforeTool, afterTool, sessionStart, userPromptSubmit, sessionEnd, specialistStart, specialistStop
 
 Flags:
       --event <event>        Hook event (required)

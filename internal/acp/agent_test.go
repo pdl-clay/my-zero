@@ -35,6 +35,76 @@ func (f fakeProvider) StreamCompletion(_ context.Context, _ zeroruntime.Completi
 	return ch, nil
 }
 
+// usageProvider streams text plus a usage event so OnUsage fires with a
+// measured generation duration.
+type usageProvider struct {
+	text string
+}
+
+func (p usageProvider) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	go func() {
+		defer close(ch)
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: p.text}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{
+			InputTokens:        5,
+			OutputTokens:       10,
+			GenerationDuration: 20 * time.Millisecond,
+		}}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	}()
+	return ch, nil
+}
+
+// twoRoundProvider emits a tool call on the first generation and a final
+// answer on the second, each with its own usage event.
+type twoRoundProvider struct {
+	mu        sync.Mutex
+	callCount int
+}
+
+func (p *twoRoundProvider) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.mu.Lock()
+	n := p.callCount
+	p.callCount++
+	p.mu.Unlock()
+
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	go func() {
+		defer close(ch)
+		if n == 0 {
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "update_plan"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"plan":[{"content":"step 1"}]}`}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"}
+			// No text/reasoning delta precedes this usage event, so
+			// internal/agent/loop.go's generation-duration stamp never fires for
+			// this round (genFirstTokenAt stays zero) — this round intentionally
+			// contributes nothing to the aggregated tokens/sec, only to the raw
+			// token counts a real provider would report.
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{
+				InputTokens:  3,
+				OutputTokens: 6,
+			}}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		} else {
+			// GenerationDuration is never set here: it is not something a real
+			// provider ever reports — internal/agent/loop.go computes and
+			// overwrites it from real wall-clock time (first streamed token to
+			// stream end), discarding whatever a provider's Usage carried. The
+			// sleep between the text delta and the usage event gives that real
+			// measurement something non-negligible to measure.
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "Done"}
+			time.Sleep(15 * time.Millisecond)
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{
+				InputTokens:  4,
+				OutputTokens: 8,
+			}}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		}
+	}()
+	return ch, nil
+}
+
 func testDeps(t *testing.T) Deps {
 	t.Helper()
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
@@ -699,6 +769,154 @@ func TestACPNoBuildSpecialistsMeansNoSpecialists(t *testing.T) {
 	}
 	if len(lastOpts.Specialists) != 0 {
 		t.Fatalf("expected no specialists with a nil BuildSpecialists, got %+v", lastOpts.Specialists)
+	}
+}
+
+// TestACPEmitsZeroUsageUpdate proves a single-call prompt produces exactly one
+// "_zero/usage" session/update, with aggregated token counts and a positive
+// throughput when the provider emits usage with a measured generation duration.
+func TestACPEmitsZeroUsageUpdate(t *testing.T) {
+	deps := testDeps(t)
+	deps.NewProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		return usageProvider{text: "Hello"}, nil
+	}
+	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		r := tools.NewRegistry()
+		r.Register(tools.NewUpdatePlanTool())
+		return r, nil, nil
+	}
+	deps.ResolveContextWindow = func(context.Context, config.ProviderProfile) int { return 200000 }
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt:    []ContentBlock{TextBlock("hi")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+
+	raw := findRawUpdate(t, h.rawUpdates, UpdateUsage)
+	var upd UsageUpdate
+	if err := json.Unmarshal(raw, &upd); err != nil {
+		t.Fatalf("unmarshal usage update: %v", err)
+	}
+	if upd.TokensPerSecond <= 0 {
+		t.Fatalf("TokensPerSecond = %v, want > 0", upd.TokensPerSecond)
+	}
+	if upd.OutputTokens != 10 || upd.InputTokens != 5 {
+		t.Fatalf("tokens = (%d,%d), want (10,5)", upd.OutputTokens, upd.InputTokens)
+	}
+	if upd.ContextWindow != 200000 || upd.ContextUsedFraction == 0 {
+		t.Fatalf("context = (%d,%v), want window=200000 fraction>0", upd.ContextWindow, upd.ContextUsedFraction)
+	}
+}
+
+// TestACPEmitsZeroUsageUpdateAggregated proves a prompt that internally takes
+// two generation rounds (tool call + final answer) still emits exactly one
+// "_zero/usage" update, with counts and throughput aggregated across both.
+func TestACPEmitsZeroUsageUpdateAggregated(t *testing.T) {
+	deps := testDeps(t)
+	provider := &twoRoundProvider{}
+	deps.NewProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) { return provider, nil }
+	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		r := tools.NewRegistry()
+		r.Register(tools.NewUpdatePlanTool())
+		return r, nil, nil
+	}
+	deps.ResolveContextWindow = func(context.Context, config.ProviderProfile) int { return 200000 }
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt:    []ContentBlock{TextBlock("do it")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+
+	raw := findRawUpdate(t, h.rawUpdates, UpdateUsage)
+	var upd UsageUpdate
+	if err := json.Unmarshal(raw, &upd); err != nil {
+		t.Fatalf("unmarshal usage update: %v", err)
+	}
+	// Exactly one notification per prompt, carrying the last generation's
+	// counts and the turn-level aggregated throughput.
+	if upd.OutputTokens != 8 || upd.InputTokens != 4 {
+		t.Fatalf("tokens = (%d,%d), want (8,4)", upd.OutputTokens, upd.InputTokens)
+	}
+	// GenerationDuration is real wall-clock time measured by internal/agent/
+	// loop.go (first streamed token to stream end), not something this fake
+	// provider controls directly, so this can't be an exact-equality check.
+	// Round 1 contributes no measured duration (no text/reasoning delta before
+	// its usage event); round 2 has an explicit 15ms sleep between its text
+	// delta and usage event. The aggregate (8 output tokens / ~15ms) should
+	// land in the hundreds of tokens/sec — comfortably away from both 0 (the
+	// bug this feature exists to avoid) and the ~1e5+ blowup a near-zero
+	// measured duration would produce (the bug this test originally had).
+	if upd.TokensPerSecond <= 0 {
+		t.Fatalf("TokensPerSecond = %v, want > 0", upd.TokensPerSecond)
+	}
+	if upd.TokensPerSecond > 5000 {
+		t.Fatalf("TokensPerSecond = %v, suspiciously high — looks like GenerationDuration was measured as near-zero", upd.TokensPerSecond)
+	}
+	if upd.ContextWindow != 200000 || upd.ContextUsedFraction == 0 {
+		t.Fatalf("context = (%d,%v), want window=200000 fraction>0", upd.ContextWindow, upd.ContextUsedFraction)
+	}
+}
+
+// TestACPEmitZeroUsageUpdateNilContextWindow confirms nil ResolveContextWindow
+// still completes the prompt and emits a usage update with ContextWindow=0
+// (fraction unknown).
+func TestACPEmitZeroUsageUpdateNilContextWindow(t *testing.T) {
+	deps := testDeps(t)
+	deps.NewProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		return usageProvider{text: "Hello"}, nil
+	}
+	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		r := tools.NewRegistry()
+		r.Register(tools.NewUpdatePlanTool())
+		return r, nil, nil
+	}
+	// intentionally leave ResolveContextWindow nil
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt:    []ContentBlock{TextBlock("hi")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+
+	raw := findRawUpdate(t, h.rawUpdates, UpdateUsage)
+	var upd UsageUpdate
+	if err := json.Unmarshal(raw, &upd); err != nil {
+		t.Fatalf("unmarshal usage update: %v", err)
+	}
+	if upd.ContextWindow != 0 || upd.ContextUsedFraction != 0 {
+		t.Fatalf("context = (%d,%v), want (0,0)", upd.ContextWindow, upd.ContextUsedFraction)
 	}
 }
 

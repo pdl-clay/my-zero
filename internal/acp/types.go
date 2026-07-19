@@ -37,6 +37,11 @@ const (
 	UpdatePlan              = "plan"
 	UpdateAvailableCommands = "available_commands_update"
 	UpdateCurrentMode       = "current_mode_update"
+	// UpdateUsage is a ZERO extension ("_zero/" prefix, same convention as
+	// UpdateSpecReviewRequired): emitted once at the end of each session/prompt
+	// turn carrying the response's average generation throughput and the final
+	// context-window utilization. Clients that don't recognize it ignore it.
+	UpdateUsage = "_zero/usage"
 	// UpdateSpecReviewRequired is a ZERO extension (not part of the ACP spec,
 	// hence the "_zero/" prefix - same convention as MethodZeroSetModel):
 	// emitted when the model calls submit_spec in spec-draft mode, so a
@@ -285,6 +290,21 @@ type AvailableCommandsUpdate struct {
 type CurrentModeUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	CurrentModeID string `json:"currentModeId"`
+}
+
+// UsageUpdate carries per-turn generation throughput and context-window usage.
+// ContextUsedTokens/ContextWindow/ContextUsedFraction mirror
+// agent.ContextBreakdown.{TotalTokens,ContextWindow,UsedFraction} (an estimate,
+// good for a budget bar, not billing). OutputTokens/InputTokens are the exact
+// provider-reported counts aggregated across this turn's generation calls.
+type UsageUpdate struct {
+	SessionUpdate       string  `json:"sessionUpdate"`
+	TokensPerSecond     float64 `json:"tokensPerSecond"`
+	OutputTokens        int     `json:"outputTokens"`
+	InputTokens         int     `json:"inputTokens"`
+	ContextUsedTokens   int     `json:"contextUsedTokens"`
+	ContextWindow       int     `json:"contextWindow"`
+	ContextUsedFraction float64 `json:"contextUsedFraction"`
 }
 
 // SpecReviewRequiredUpdate carries the saved spec's identity so a client can

@@ -188,6 +188,7 @@ Events the agent emits (in dispatch order):
 | `beforeTool` | A tool is about to run | yes (tool name) |
 | `afterTool` | A tool just returned | yes (tool name) |
 | `sessionStart` | A session begins | no |
+| `userPromptSubmit` | The user's prompt is received, before the first model turn | no |
 | `sessionEnd` | A session ends | no |
 | `specialistStart` | A sub-agent is spawned | yes (specialist name) |
 | `specialistStop` | A sub-agent ends | yes (specialist name) |

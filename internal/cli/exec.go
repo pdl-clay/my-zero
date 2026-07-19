@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/errhint"
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -203,6 +204,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		registry.Register(tools.NewEscalateModelTool())
 	}
 	var specialistRuntime *agentToolRuntime
+	// hookDispatcher is assigned further down (once the trust root and plugin
+	// hooks are known); the closure captures it by reference so
+	// specialistStart/specialistStop hooks resolve the real dispatcher once a
+	// run actually spawns a specialist.
+	var hookDispatcher *hooks.Dispatcher
 	if shouldRegisterExecSpecialistTools(options) {
 		// Specialist tools register before the full config resolve below (so
 		// --list-tools stays offline). swarm.maxTeamSize is not affected by
@@ -213,7 +219,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
 		}
 		var err error
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize)
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize, func() *hooks.Dispatcher { return hookDispatcher })
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}

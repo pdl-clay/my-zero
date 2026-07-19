@@ -147,7 +147,12 @@ func (tool *OutputTool) readOutput(task background.Task) tools.Result {
 	dataString := string(data)
 	summary, rawLines := summarizeTaskData(dataString, task.ExitCode)
 	if task.Status != background.StatusRunning {
-		Executor{SessionStore: tool.SessionStore}.recordBackgroundTaskAccounting(task, summary)
+		// No HooksFunc here (deliberately unset): this throwaway executor backs the
+		// TaskOutput poll-fallback path, which can race the real onExit executor's
+		// stop accounting. Session-event dedup (appendSpecialistEventOnce) already
+		// guarantees a single stop *event*, but hook dispatch has no such dedup, so
+		// leaving this executor hook-less is what keeps specialistStop single-fire.
+		Executor{SessionStore: tool.SessionStore}.recordBackgroundTaskAccounting(context.Background(), task, summary)
 	}
 	return tools.Result{
 		Status: tools.StatusOK,

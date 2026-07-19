@@ -169,6 +169,24 @@ func TestDispatchDeliversJSONPayloadOnStdin(t *testing.T) {
 	}
 }
 
+func TestDispatchDeliversPromptTextOnUserPromptSubmit(t *testing.T) {
+	var gotStdin string
+	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+		gotStdin = string(stdin)
+		return commandResult{ExitCode: 0}
+	}
+	config := beforeToolConfig(Definition{ID: "h", Event: EventUserPromptSubmit, Command: "x", Enabled: true})
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner})
+
+	dispatcher.Dispatch(context.Background(), DispatchInput{
+		Event:   EventUserPromptSubmit,
+		Payload: map[string]any{"event": string(EventUserPromptSubmit), "prompt": "fix the flaky test"},
+	})
+	if !strings.Contains(gotStdin, `"prompt":"fix the flaky test"`) {
+		t.Fatalf("stdin payload = %q, want the real prompt text", gotStdin)
+	}
+}
+
 func TestExecCommandRunnerCapturesExitAndStdin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/sh")

@@ -681,7 +681,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
+	// hookDispatcher is assigned below (after specialist-tool registration, once
+	// the trust root and plugin hooks are known); the closure captures it by
+	// reference so specialistStart/specialistStop hooks resolve the real
+	// dispatcher once a run actually spawns a specialist.
+	var hookDispatcher *hooks.Dispatcher
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, func() *hooks.Dispatcher { return hookDispatcher })
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
@@ -1116,8 +1121,8 @@ func (r *agentToolRuntime) Close() error {
 	return errors.Join(errs...)
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
-	return registerSpecialistToolsWithBaseDir(registry, workspaceRoot, maxTeamSize, filepath.Join(workspaceRoot, ".zero", "swarm"))
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, hooksFn func() *hooks.Dispatcher) (*agentToolRuntime, error) {
+	return registerSpecialistToolsWithBaseDir(registry, workspaceRoot, maxTeamSize, filepath.Join(workspaceRoot, ".zero", "swarm"), hooksFn)
 }
 
 // registerSpecialistToolsWithBaseDir is registerSpecialistTools with an
@@ -1126,12 +1131,17 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 // needs one runtime *per session* rather than per process - each needs its
 // own mailbox dir so concurrent sessions rooted at the same workspace don't
 // collide.
-func registerSpecialistToolsWithBaseDir(registry *tools.Registry, workspaceRoot string, maxTeamSize int, baseDir string) (*agentToolRuntime, error) {
+//
+// hooksFn is resolved lazily by the specialist executor (see
+// specialist.Executor.HooksFunc): callers build their hook dispatcher AFTER
+// registering specialist tools, so hooksFn is a getter closure over a
+// not-yet-assigned variable, not the dispatcher itself.
+func registerSpecialistToolsWithBaseDir(registry *tools.Registry, workspaceRoot string, maxTeamSize int, baseDir string, hooksFn func() *hooks.Dispatcher) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	executor := specialist.Executor{Paths: paths}
+	executor := specialist.Executor{Paths: paths, HooksFunc: hooksFn}
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {
 		return nil, err

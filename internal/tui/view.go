@@ -263,6 +263,11 @@ func (m model) statusLine(width int) string {
 	if usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
 	}
+	if tier >= tierFull {
+		if tps := m.tokPerSecSegment(); tps != "" {
+			rightGroups = append(rightGroups, zeroTheme.muted.Render(tps))
+		}
+	}
 	right := strings.Join(rightGroups, separator)
 
 	return fitStyledLine(joinHeaderLine(left, right, width), width)
@@ -405,6 +410,15 @@ func (m model) contextWindowSegment() string {
 		return ""
 	}
 	return style.Render(fmt.Sprintf("◔ %s/%s · %d%%", humanCount(used), humanCount(window), pct))
+}
+
+// tokPerSecSegment renders the last completed response's average generation
+// throughput as "N tok/s". Empty until a measured response lands.
+func (m model) tokPerSecSegment() string {
+	if m.lastTokensPerSecond <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s tok/s", humanCount(int(m.lastTokensPerSecond+0.5)))
 }
 
 // humanCount renders a token count the way the status line wants it: 999,

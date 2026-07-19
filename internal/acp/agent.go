@@ -33,6 +33,11 @@ type Deps struct {
 	// validated workspace root, so ACP shell tools (bash/exec_command) are confined
 	// exactly like the exec surface — never run unconfined on the host.
 	BuildWorkspace func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error)
+	// ResolveContextWindow returns the model's context window for a resolved
+	// provider profile (registry value, else live discovery, else fallback), so
+	// MeasureContext can compute UsedFraction and the _zero/usage update can
+	// report the window. Nil-safe: a nil func yields window 0 (fraction unknown).
+	ResolveContextWindow func(ctx context.Context, profile config.ProviderProfile) int
 	// BuildSpecialists builds this session's specialist/Task/swarm tooling
 	// (see SpecialistTooling). Nil-safe: a nil func means ACP sessions get
 	// no Task tool, same as before this existed. sessionID lets the
@@ -317,6 +322,18 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 
 	mode := sess.currentMode()
 
+	var (
+		tpsOutSum int
+		tpsDur    time.Duration
+		lastUsage agent.Usage
+		lastCtx   agent.ContextBreakdown
+		haveUsage bool
+	)
+	ctxWindow := 0
+	if a.deps.ResolveContextWindow != nil {
+		ctxWindow = a.deps.ResolveContextWindow(ctx, resolved.Provider)
+	}
+
 	// Build (first turn) or reuse (later turns) this session's Task-tool/
 	// specialist support. Registering into `registry` here, rather than
 	// once inside BuildWorkspace, is what avoids rebuilding the
@@ -369,6 +386,16 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		OnText:             note.text,
 		OnReasoning:        note.thought,
 		OnToolCall:         note.toolCall,
+		ContextWindow:      ctxWindow,
+		OnContext:          func(b agent.ContextBreakdown) { lastCtx = b },
+		OnUsage: func(u agent.Usage) {
+			lastUsage = u
+			haveUsage = true
+			if u.GenerationDuration > 0 {
+				tpsOutSum += u.EffectiveOutputTokens()
+				tpsDur += u.GenerationDuration
+			}
+		},
 		OnToolResult: func(result agent.ToolResult) {
 			note.toolResult(result)
 			if result.Name == "update_plan" {
@@ -429,6 +456,20 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 			"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
 			err,
 		)
+	}
+	if haveUsage {
+		var tps float64
+		if tpsDur > 0 {
+			tps = float64(tpsOutSum) / tpsDur.Seconds()
+		}
+		note.usage(UsageUpdate{
+			TokensPerSecond:     tps,
+			OutputTokens:        lastUsage.EffectiveOutputTokens(),
+			InputTokens:         lastUsage.EffectiveInputTokens(),
+			ContextUsedTokens:   lastCtx.TotalTokens,
+			ContextWindow:       lastCtx.ContextWindow,
+			ContextUsedFraction: lastCtx.UsedFraction,
+		})
 	}
 	return reason, nil
 }

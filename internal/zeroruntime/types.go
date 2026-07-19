@@ -3,6 +3,7 @@ package zeroruntime
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 // MessageRole identifies the origin of a conversation message.
@@ -131,14 +132,21 @@ type TokenUsage struct {
 // OutputTokens is the TOTAL output size, including hidden reasoning tokens when
 // a provider reports them separately; ReasoningTokens is a subset of OutputTokens,
 // not an additive count.
+//
+// GenerationDuration is measured by the agent loop (not by providers) for the
+// specific generation call that produced this usage: from the first streamed
+// token or reasoning delta until the end of that call's stream. It is zero when
+// not measured (for example, internal/overhead generation calls such as
+// compaction retries are intentionally uninstrumented).
 type Usage struct {
-	InputTokens       int
-	OutputTokens      int
-	PromptTokens      int
-	CompletionTokens  int
-	CachedInputTokens int
-	CacheWriteTokens  int
-	ReasoningTokens   int
+	InputTokens        int
+	OutputTokens       int
+	PromptTokens       int
+	CompletionTokens   int
+	CachedInputTokens  int
+	CacheWriteTokens   int
+	ReasoningTokens    int
+	GenerationDuration time.Duration
 }
 
 // TotalTokens returns prompt plus completion tokens.
@@ -170,6 +178,21 @@ func (usage Usage) VisibleOutputTokens() int {
 		return 0
 	}
 	return visible
+}
+
+// TokensPerSecond returns the average generation throughput for the call that
+// produced this usage, measured as effective output tokens divided by the
+// elapsed generation duration. It returns 0 when the duration was not measured
+// or when there is no billable output.
+func (usage Usage) TokensPerSecond() float64 {
+	if usage.GenerationDuration <= 0 {
+		return 0
+	}
+	out := usage.EffectiveOutputTokens()
+	if out <= 0 {
+		return 0
+	}
+	return float64(out) / usage.GenerationDuration.Seconds()
 }
 
 // StreamEvent is one normalized event emitted by a streaming provider.

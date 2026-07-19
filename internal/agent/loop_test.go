@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -50,6 +51,7 @@ func TestRunDispatchesSessionLifecycleHooks(t *testing.T) {
 			Enabled: true,
 			Hooks: []hooks.Definition{
 				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: "zero-missing-hook-command", Enabled: true},
+				{ID: "zero.user-prompt-submit", Event: hooks.EventUserPromptSubmit, Command: "zero-missing-hook-command", Enabled: true},
 				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: "zero-missing-hook-command", Enabled: true},
 			},
 		},
@@ -88,9 +90,129 @@ func TestRunDispatchesSessionLifecycleHooks(t *testing.T) {
 	if started[hooks.EventSessionStart] != 1 || completed[hooks.EventSessionStart] != 1 {
 		t.Fatalf("sessionStart audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionStart], completed[hooks.EventSessionStart], events)
 	}
+	if started[hooks.EventUserPromptSubmit] != 1 || completed[hooks.EventUserPromptSubmit] != 1 {
+		t.Fatalf("userPromptSubmit audit counts started/completed = %d/%d, events=%#v", started[hooks.EventUserPromptSubmit], completed[hooks.EventUserPromptSubmit], events)
+	}
 	if started[hooks.EventSessionEnd] != 1 || completed[hooks.EventSessionEnd] != 1 {
 		t.Fatalf("sessionEnd audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSessionEnd], completed[hooks.EventSessionEnd], events)
 	}
+}
+
+func TestExtractSessionStartContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []string
+		want     string
+	}{
+		{name: "no messages", messages: nil, want: ""},
+		{name: "no-op ack", messages: []string{"{}"}, want: ""},
+		{name: "blank", messages: []string{"  "}, want: ""},
+		{name: "not json", messages: []string{"plain text, not a hook contract"}, want: ""},
+		{name: "wrong schema", messages: []string{`{"foo":"bar"}`}, want: ""},
+		{
+			name:     "single handoff",
+			messages: []string{`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"prior session summary"}}`},
+			want:     "prior session summary",
+		},
+		{
+			name: "multiple hooks join with blank line",
+			messages: []string{
+				`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"first"}}`,
+				"{}",
+				`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"second"}}`,
+			},
+			want: "first\n\nsecond",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractSessionStartContext(tt.messages); got != tt.want {
+				t.Fatalf("extractSessionStartContext(%#v) = %q, want %q", tt.messages, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunInjectsSessionStartHandoffContextIntoFirstTurn proves the fix end to
+// end: a sessionStart hook that speaks the hookSpecificOutput.additionalContext
+// contract (the same schema ai-memory's Claude Code integration emits for a
+// cross-agent handoff) gets woven into the model-facing first user turn, while
+// the RAW prompt text handed to the userPromptSubmit hook (and returned in
+// Result.Messages' provenance) stays exactly what the user typed - proving the
+// two concerns (handoff injection vs. prompt capture) don't cross-contaminate.
+func TestRunInjectsSessionStartHandoffContextIntoFirstTurn(t *testing.T) {
+	root := t.TempDir()
+	sessionStartScript := filepath.Join(root, "session-start.sh")
+	sessionStartOutput := `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"pending handoff: finish the auth refactor"}}` + "\n"
+	if err := os.WriteFile(sessionStartScript, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s' "+shellQuote(sessionStartOutput)+"\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile session-start script: %v", err)
+	}
+	capturedPromptFile := filepath.Join(root, "captured-prompt.json")
+	userPromptScript := filepath.Join(root, "user-prompt-submit.sh")
+	if err := os.WriteFile(userPromptScript, []byte("#!/bin/sh\ncat >"+shellQuote(capturedPromptFile)+"\nprintf '{}'\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile user-prompt-submit script: %v", err)
+	}
+
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: sessionStartScript, Enabled: true},
+				{ID: "zero.user-prompt-submit", Event: hooks.EventUserPromptSubmit, Command: userPromptScript, Enabled: true},
+			},
+		},
+	})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+
+	const rawPrompt = "add a health check endpoint"
+	if _, err := Run(context.Background(), rawPrompt, provider, Options{
+		SessionID:    "session-123",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Hooks:        dispatcher,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(provider.requests) == 0 {
+		t.Fatal("provider received no requests")
+	}
+	firstRequest := provider.requests[0]
+	if len(firstRequest.Messages) < 2 {
+		t.Fatalf("first request has %d messages, want at least system+user", len(firstRequest.Messages))
+	}
+	userTurn := firstRequest.Messages[1].Content
+	if !strings.Contains(userTurn, "pending handoff: finish the auth refactor") {
+		t.Fatalf("first user turn = %q, want it to contain the injected handoff context", userTurn)
+	}
+	if !strings.Contains(userTurn, rawPrompt) {
+		t.Fatalf("first user turn = %q, want it to still contain the raw prompt", userTurn)
+	}
+
+	capturedPromptPayload, err := os.ReadFile(capturedPromptFile)
+	if err != nil {
+		t.Fatalf("ReadFile captured prompt: %v", err)
+	}
+	var payload struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal(capturedPromptPayload, &payload); err != nil {
+		t.Fatalf("Unmarshal captured prompt payload: %v (raw=%s)", err, capturedPromptPayload)
+	}
+	if payload.Prompt != rawPrompt {
+		t.Fatalf("userPromptSubmit payload prompt = %q, want exactly the raw prompt %q (no handoff-context contamination)", payload.Prompt, rawPrompt)
+	}
+}
+
+// shellQuote wraps s in single quotes for embedding as a literal argument in a
+// generated POSIX sh script, escaping any single quote in s itself. Test-only
+// helper: the scripts above are trusted, fixed strings, not untrusted input.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 type recordingWebSearchTool struct {
@@ -3657,5 +3779,141 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("OnUsage not forwarded when Trace is nil")
+	}
+}
+
+// TestRunGenerationDurationPropagated verifies that when a traced run streams text
+// the loop measures GenerationDuration from the first token and propagates it back
+// through the collected usage AND the user's OnUsage callback.
+func TestRunGenerationDurationPropagated(t *testing.T) {
+	var capturedUsage zeroruntime.Usage
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	rec := trace.NewRecorder("gen-dur-session", "run-1", "test")
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "gen-dur-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Trace:        rec,
+		OnUsage:      func(u zeroruntime.Usage) { capturedUsage = u },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rec.Finish()
+	if capturedUsage.GenerationDuration <= 0 {
+		t.Fatalf("OnUsage.GenerationDuration = %v, want > 0", capturedUsage.GenerationDuration)
+	}
+	if capturedUsage.TokensPerSecond() <= 0 {
+		t.Fatalf("OnUsage.TokensPerSecond() = %v, want > 0", capturedUsage.TokensPerSecond())
+	}
+}
+
+// slowToolForGenerationDurationTest sleeps before returning, standing in for a
+// tool call that takes real wall-clock time between two model generation calls.
+type slowToolForGenerationDurationTest struct{ delay time.Duration }
+
+func (tool *slowToolForGenerationDurationTest) Name() string        { return "slow_tool" }
+func (tool *slowToolForGenerationDurationTest) Description() string { return "test tool that sleeps" }
+func (tool *slowToolForGenerationDurationTest) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: true}
+}
+func (tool *slowToolForGenerationDurationTest) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow}
+}
+func (tool *slowToolForGenerationDurationTest) Run(context.Context, map[string]any) tools.Result {
+	time.Sleep(tool.delay)
+	return tools.Result{Status: tools.StatusOK, Output: "slow done"}
+}
+
+// TestRunGenerationDurationNotInflatedAcrossToolCallTurns is the guard against
+// the exact bug this feature must avoid: naively anchoring "generation start"
+// once for the whole Run() (as the trace recorder's FirstTokenAt already does,
+// first-call-wins) would make turn 2's GenerationDuration wrongly include turn
+// 1's stream time PLUS the tool's execution time. Turn 2's measured duration
+// must reflect only turn 2's own (here, near-instant) mock stream.
+func TestRunGenerationDurationNotInflatedAcrossToolCallTurns(t *testing.T) {
+	const toolDelay = 150 * time.Millisecond
+	registry := tools.NewRegistry()
+	registry.Register(&slowToolForGenerationDurationTest{delay: toolDelay})
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventText, Content: "turn one text"},
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "slow_tool"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{OutputTokens: 5}},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "turn two final answer"},
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{OutputTokens: 5}},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	var usages []zeroruntime.Usage
+	rec := trace.NewRecorder("gen-dur-multi-turn", "run-1", "test")
+	if _, err := Run(context.Background(), "do the thing", provider, Options{
+		SessionID:    "gen-dur-multi-turn",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		Registry:     registry,
+		Trace:        rec,
+		OnUsage:      func(u zeroruntime.Usage) { usages = append(usages, u) },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rec.Finish()
+
+	if len(usages) != 2 {
+		t.Fatalf("expected 2 OnUsage calls (one per turn), got %d: %#v", len(usages), usages)
+	}
+	turn1, turn2 := usages[0], usages[1]
+	if turn1.GenerationDuration <= 0 {
+		t.Fatalf("turn 1 GenerationDuration = %v, want > 0", turn1.GenerationDuration)
+	}
+	if turn2.GenerationDuration <= 0 {
+		t.Fatalf("turn 2 GenerationDuration = %v, want > 0", turn2.GenerationDuration)
+	}
+	// The naive/buggy implementation would show turn 2's duration at or above
+	// toolDelay (since it would span turn 1's stream + the tool's sleep). A
+	// correctly per-turn-scoped measurement stays far below it, since turn 2's
+	// own mock stream is delivered instantly.
+	if turn2.GenerationDuration >= toolDelay {
+		t.Fatalf("turn 2 GenerationDuration = %v, want well under the %v tool delay (turn 1 + tool time leaked into turn 2's measurement)", turn2.GenerationDuration, toolDelay)
+	}
+}
+
+// TestRunNilTraceOnUsageFiresWithoutGenerationDuration verifies that when Trace is
+// nil the user's OnUsage still fires but GenerationDuration is left at zero (it
+// is measured only when a trace is active).
+func TestRunNilTraceOnUsageFiresWithoutGenerationDuration(t *testing.T) {
+	var capturedUsage zeroruntime.Usage
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 7, OutputTokens: 3}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	if _, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "no-trace-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+		OnUsage:      func(u zeroruntime.Usage) { capturedUsage = u },
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// OnUsage must still fire with the provider-reported counters.
+	if capturedUsage.InputTokens != 7 {
+		t.Fatalf("OnUsage.InputTokens = %d, want 7", capturedUsage.InputTokens)
+	}
+	if capturedUsage.GenerationDuration != 0 {
+		t.Fatalf("OnUsage.GenerationDuration = %v, want 0 (no trace active)", capturedUsage.GenerationDuration)
 	}
 }

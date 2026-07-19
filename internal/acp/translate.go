@@ -223,3 +223,8 @@ func (n *notifier) specReviewRequired(meta map[string]string) {
 		RelativePath:  meta["relativePath"],
 	})
 }
+
+func (n *notifier) usage(u UsageUpdate) {
+	u.SessionUpdate = UpdateUsage
+	n.send(u)
+}

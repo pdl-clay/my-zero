@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -51,5 +52,49 @@ func TestStatusLineDoesNotDuplicateTokenFigureNextToGauge(t *testing.T) {
 	}
 	if strings.Contains(status, "tok") {
 		t.Fatalf("status line = %q, the plain token segment should be suppressed once the gauge shows the same figure", status)
+	}
+}
+
+func TestTokPerSecSegmentEmptyWhenNoMeasuredGeneration(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
+	if got := m.tokPerSecSegment(); got != "" {
+		t.Fatalf("expected empty tok/s segment before any measured generation, got %q", got)
+	}
+}
+
+func TestTokPerSecSegmentRendersMeasuredThroughput(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
+	m.lastTokensPerSecond = 42
+	got := plainRender(t, m.tokPerSecSegment())
+	if !strings.Contains(got, "42") || !strings.Contains(got, "tok/s") {
+		t.Fatalf("tokPerSecSegment = %q, expected it to contain 42 tok/s", got)
+	}
+}
+
+func TestAgentUsageMessageAccumulatesTokensPerSecond(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
+	m.activeRunID = 1
+
+	updated, _ := m.Update(agentUsageMsg{runID: 1, modelID: "gpt-4.1", usage: zeroruntime.Usage{
+		OutputTokens:       100,
+		GenerationDuration: 2 * time.Second,
+	}})
+	m = updated.(model)
+	if m.lastTokensPerSecond == 0 {
+		t.Fatalf("expected lastTokensPerSecond to be set after first measured generation, got 0")
+	}
+	first := m.lastTokensPerSecond
+
+	updated, _ = m.Update(agentUsageMsg{runID: 1, modelID: "gpt-4.1", usage: zeroruntime.Usage{
+		OutputTokens:       200,
+		GenerationDuration: 2 * time.Second,
+	}})
+	m = updated.(model)
+	want := 300.0 / 4.0
+	if m.lastTokensPerSecond != want {
+		t.Fatalf("after second generation expected %f tok/s, got %f", want, m.lastTokensPerSecond)
+	}
+	if m.lastTokensPerSecond == first {
+		t.Fatalf("expected accumulated value to differ from first measured value")
 	}
 }

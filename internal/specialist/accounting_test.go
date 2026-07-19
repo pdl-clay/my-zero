@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -88,6 +90,84 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 	requirePayloadString(t, stopPayload, "status", "success")
 	requirePayloadInt(t, stopPayload, "exitCode", 0)
 	requirePayloadBool(t, stopPayload, "usageRolledUp", true)
+}
+
+func TestExecutorDispatchesSpecialistLifecycleHooks(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.subagent-start", Event: hooks.EventSpecialistStart, Command: "zero-missing-hook-command", Enabled: true},
+				{ID: "zero.subagent-stop", Event: hooks.EventSpecialistStop, Command: "zero-missing-hook-command", Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+	zero := 0
+	executor := Executor{
+		BinaryPath:   "/usr/local/bin/zero",
+		SessionStore: store,
+		NewSessionID: func() (string, error) { return "child_task", nil },
+		HooksFunc:    func() *hooks.Dispatcher { return dispatcher },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		RunChild: func(context.Context, string, []string, func(streamjson.Event)) (ChildRunResult, error) {
+			return ChildRunResult{
+				Events: []streamjson.Event{
+					{Type: streamjson.EventRunStart, RunID: "run_1", SessionID: "child_task"},
+					{Type: streamjson.EventFinal, RunID: "run_1", Text: "done"},
+					{Type: streamjson.EventRunEnd, RunID: "run_1", Status: "success", ExitCode: &zero},
+				},
+				ExitCode: 0,
+			}, nil
+		},
+	}
+
+	if _, err := executor.Run(context.Background(), TaskParameters{
+		Name:        "worker",
+		Prompt:      "inspect auth",
+		Description: "Auth check",
+	}, TaskRunOptions{
+		ParentSessionID: parent.SessionID,
+		ToolCallID:      "call_1",
+	}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	started := map[hooks.Event]int{}
+	completed := map[hooks.Event]int{}
+	for _, event := range events {
+		switch event.Type {
+		case "hook_execution_started":
+			started[event.Event]++
+		case "hook_execution_completed":
+			completed[event.Event]++
+		}
+	}
+	if started[hooks.EventSpecialistStart] != 1 || completed[hooks.EventSpecialistStart] != 1 {
+		t.Fatalf("specialistStart audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSpecialistStart], completed[hooks.EventSpecialistStart], events)
+	}
+	if started[hooks.EventSpecialistStop] != 1 || completed[hooks.EventSpecialistStop] != 1 {
+		t.Fatalf("specialistStop audit counts started/completed = %d/%d, events=%#v", started[hooks.EventSpecialistStop], completed[hooks.EventSpecialistStop], events)
+	}
 }
 
 func TestExecutorRecordsStartedChildErrorExitCode(t *testing.T) {
@@ -303,7 +383,7 @@ func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			executor.recordSpecialistStop(input, summary, "success", 0, nil, true)
+			executor.recordSpecialistStop(context.Background(), input, summary, "success", 0, nil, true)
 		}()
 	}
 	wg.Wait()

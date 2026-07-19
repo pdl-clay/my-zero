@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -50,6 +51,15 @@ type Executor struct {
 	BackgroundManager     *background.Manager
 	BackgroundManagerFunc BackgroundManagerFunc
 	BackgroundRuntime     *Runtime
+	// HooksFunc resolves the run's hook dispatcher, if any, for specialistStart/
+	// specialistStop lifecycle hooks. A getter (not a plain *hooks.Dispatcher
+	// field) because Executor is captured BY VALUE when specialist tools are
+	// registered (NewTaskTool, NewSpecialistLauncher), which happens before the
+	// caller has built its hook dispatcher — a plain field would always be nil.
+	// The closure captures the not-yet-assigned dispatcher variable by reference,
+	// so it resolves correctly once the dispatcher is built later in the same
+	// setup function. nil is safe: dispatch becomes a no-op.
+	HooksFunc func() *hooks.Dispatcher
 }
 
 type BuildArgsInput struct {
@@ -512,7 +522,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		Mode:            "background",
 		Background:      true,
 	}
-	executor.recordSpecialistStart(accounting)
+	executor.recordSpecialistStart(ctx, accounting)
 	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
 		status := background.StatusCompleted
 		if exitCode != 0 {
@@ -524,14 +534,17 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 			if data, err := os.ReadFile(task.OutputFile); err == nil {
 				summary, _ = summarizeTaskData(string(data), task.ExitCode)
 			}
-			executor.recordBackgroundTaskAccounting(task, summary)
+			// No live request ctx survives into this async exit callback (it can
+			// fire long after the tool call that started it returned), so the
+			// stop hook dispatches with a background context.
+			executor.recordBackgroundTaskAccounting(context.Background(), task, summary)
 		}
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 	})
 	if err != nil {
 		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
-		executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
+		executor.recordSpecialistStop(ctx, accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 		return ExecResult{}, err
 	}
 	if pid > 0 {
@@ -548,7 +561,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 			}
 			_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
-			executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
+			executor.recordSpecialistStop(ctx, accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 			return ExecResult{}, err
 		}
 	}
@@ -623,12 +636,12 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		Mode:            mode,
 		Background:      false,
 	}
-	executor.recordSpecialistStart(accounting)
+	executor.recordSpecialistStart(ctx, accounting)
 	run, err := executor.runChild(ctx, binaryPath, built.Args, progress)
 	if err != nil {
 		exitCode := run.exitCodeOr(-1)
 		summary := SummarizeStream(run.Events, exitCode)
-		executor.recordSpecialistStop(accounting, summary, "error", summary.ExitCode, err, false)
+		executor.recordSpecialistStop(ctx, accounting, summary, "error", summary.ExitCode, err, false)
 		// Carry the child session id even on a post-start failure so a caller (the
 		// swarm launcher -> FailWithSession) can still make the failed member
 		// drillable; the session exists once the child has started.
@@ -636,7 +649,7 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 	}
 	summary := SummarizeStream(run.Events, run.ExitCode)
 	rolledUp := executor.rollUpSpecialistUsage(accounting, summary)
-	executor.recordSpecialistStop(accounting, summary, summary.Status, summary.ExitCode, nil, rolledUp)
+	executor.recordSpecialistStop(ctx, accounting, summary, summary.Status, summary.ExitCode, nil, rolledUp)
 	return ExecResult{
 		Result:    BuildFinalResult(run.Events, run.Stderr, run.ExitCode, run.Signal),
 		SessionID: built.SessionID,

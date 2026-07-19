@@ -1,11 +1,13 @@
 package specialist
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
 
 	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
@@ -33,12 +35,13 @@ type specialistAccountingInput struct {
 	PID             int
 }
 
-func (executor Executor) recordSpecialistStart(input specialistAccountingInput) {
+func (executor Executor) recordSpecialistStart(ctx context.Context, input specialistAccountingInput) {
 	payload := baseSpecialistPayload(input)
 	_, _ = appendSpecialistSessionEvent(executor.SessionStore, input.ParentSessionID, sessions.EventSpecialistStart, payload)
+	executor.dispatchSpecialistHook(ctx, hooks.EventSpecialistStart, hookSpecialistPayload(hooks.EventSpecialistStart, input, payload))
 }
 
-func (executor Executor) recordSpecialistStop(input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
+func (executor Executor) recordSpecialistStop(ctx context.Context, input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
 	store := accountingStore(executor.SessionStore)
 	accountingMu.Lock()
 	defer accountingMu.Unlock()
@@ -58,6 +61,37 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	// Atomic check+append under the session lock so a concurrent stop path cannot
 	// also pass the existence check and write a duplicate stop event.
 	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+	executor.dispatchSpecialistHook(ctx, hooks.EventSpecialistStop, hookSpecialistPayload(hooks.EventSpecialistStop, input, payload))
+}
+
+// dispatchSpecialistHook fires a specialistStart/specialistStop lifecycle hook,
+// if a dispatcher is available. HooksFunc is resolved lazily (not read at
+// construction) because Executor is captured by value when tools are
+// registered, before the run's hook dispatcher exists yet — see Executor's
+// HooksFunc field doc.
+func (executor Executor) dispatchSpecialistHook(ctx context.Context, event hooks.Event, payload map[string]any) {
+	if executor.HooksFunc == nil {
+		return
+	}
+	dispatcher := executor.HooksFunc()
+	if dispatcher == nil {
+		return
+	}
+	dispatcher.Dispatch(ctx, hooks.DispatchInput{Event: event, Payload: payload})
+}
+
+// hookSpecialistPayload builds the hook-facing payload for a specialist
+// lifecycle event: the session-event payload (already built by the caller)
+// plus the event name and the parent (orchestrator) session id, which is what
+// an external integration attributes the subagent activity to.
+func hookSpecialistPayload(event hooks.Event, input specialistAccountingInput, base map[string]any) map[string]any {
+	payload := make(map[string]any, len(base)+2)
+	for key, value := range base {
+		payload[key] = value
+	}
+	payload["event"] = string(event)
+	payload["sessionId"] = strings.TrimSpace(input.ParentSessionID)
+	return payload
 }
 
 func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, summary StreamResult) bool {
@@ -65,7 +99,7 @@ func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, 
 	return rolledUp
 }
 
-func (executor Executor) recordBackgroundTaskAccounting(task background.Task, summary StreamResult) {
+func (executor Executor) recordBackgroundTaskAccounting(ctx context.Context, task background.Task, summary StreamResult) {
 	if task.Status == background.StatusRunning {
 		return
 	}
@@ -79,7 +113,7 @@ func (executor Executor) recordBackgroundTaskAccounting(task background.Task, su
 		PID:             task.PID,
 	}
 	rolledUp := executor.rollUpSpecialistUsage(input, summary)
-	executor.recordSpecialistStop(input, summary, string(task.Status), task.ExitCode, nil, rolledUp)
+	executor.recordSpecialistStop(ctx, input, summary, string(task.Status), task.ExitCode, nil, rolledUp)
 }
 
 func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccountingInput, summary StreamResult) (bool, error) {

@@ -20,12 +20,13 @@ type ConfigSource string
 type AuditStatus string
 
 const (
-	EventBeforeTool      Event = "beforeTool"
-	EventAfterTool       Event = "afterTool"
-	EventSessionStart    Event = "sessionStart"
-	EventSessionEnd      Event = "sessionEnd"
-	EventSpecialistStart Event = "specialistStart"
-	EventSpecialistStop  Event = "specialistStop"
+	EventBeforeTool       Event = "beforeTool"
+	EventAfterTool        Event = "afterTool"
+	EventSessionStart     Event = "sessionStart"
+	EventUserPromptSubmit Event = "userPromptSubmit"
+	EventSessionEnd       Event = "sessionEnd"
+	EventSpecialistStart  Event = "specialistStart"
+	EventSpecialistStop   Event = "specialistStop"
 )
 
 const (
@@ -891,7 +892,7 @@ func requiredID(obj map[string]any, field string) (string, error) {
 
 // KnownEvents returns the hook events Zero recognizes, in dispatch order.
 func KnownEvents() []Event {
-	return []Event{EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop}
+	return []Event{EventBeforeTool, EventAfterTool, EventSessionStart, EventUserPromptSubmit, EventSessionEnd, EventSpecialistStart, EventSpecialistStop}
 }
 
 // IsValidEvent reports whether event is one Zero recognizes.
@@ -911,7 +912,7 @@ func parseEvent(raw any, field string) (Event, error) {
 	}
 	event := Event(strings.TrimSpace(text))
 	if !IsValidEvent(event) {
-		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, or specialistStop."}
+		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, userPromptSubmit, sessionEnd, specialistStart, or specialistStop."}
 	}
 	return event, nil
 }

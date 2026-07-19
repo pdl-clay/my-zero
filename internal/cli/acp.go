@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"github.com/Gitlawb/zero/internal/acp"
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -69,8 +72,15 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		// turn like BuildWorkspace above - see buildACPSpecialistTooling.
 		BuildSpecialists:     buildACPSpecialistTooling,
 		ResolveWorkspaceRoot: acpWorkspaceRootResolver(deps),
-		Store:                deps.newSessionStore(),
-		AgentInfo:            acp.Implementation{Name: "zero", Version: version},
+		ResolveContextWindow: func(ctx context.Context, profile config.ProviderProfile) int {
+			registry, err := modelregistry.DefaultRegistry()
+			if err != nil {
+				return 0
+			}
+			return resolveAgentContextWindow(ctx, registry, profile)
+		},
+		Store:     deps.newSessionStore(),
+		AgentInfo: acp.Implementation{Name: "zero", Version: version},
 	})
 
 	ctx, stop := signalContext()
@@ -96,7 +106,10 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 func buildACPSpecialistTooling(sessionID, workspaceRoot string, resolved config.ResolvedConfig) (acp.SpecialistTooling, error) {
 	registry := tools.NewRegistry()
 	baseDir := filepath.Join(workspaceRoot, ".zero", "swarm", sessionID)
-	runtime, err := registerSpecialistToolsWithBaseDir(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, baseDir)
+	// ACP turns don't build a hooks.Dispatcher of their own yet (agent.Options.Hooks
+	// stays nil for this surface), so specialistStart/specialistStop hooks are a
+	// no-op here today - same as every other hook event over ACP.
+	runtime, err := registerSpecialistToolsWithBaseDir(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, baseDir, func() *hooks.Dispatcher { return nil })
 	if err != nil {
 		return nil, err
 	}
